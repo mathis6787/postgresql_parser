@@ -1,0 +1,2 @@
+# Keep this workspace independent of machine-specific parent analyzer settings.
+analyzer: {}
