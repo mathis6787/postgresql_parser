@@ -1,0 +1,9 @@
+name: postgresql_parser_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.9.0
+
+workspace:
+  - packages/postgresql_parser
+  - packages/serverpod_sql_check

@@ -1,0 +1,16 @@
+name: postgresql_parser
+description: A Dart parser for PostgreSQL SQL, built on top of libpg_query (native bindings to be added).
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.0
+
+resolution: workspace
+dependencies:
+  code_assets: ^2.1.0
+  ffi: ^2.2.0
+  hooks: ^2.2.0
+  native_toolchain_c: ^0.19.5
+dev_dependencies:
+  ffigen: ^22.0.0

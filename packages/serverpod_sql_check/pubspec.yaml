@@ -1,0 +1,9 @@
+name: serverpod_sql_check
+description: Static SQL checking utilities for Serverpod, built on top of postgresql_parser (implementation to come).
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.0
+
+resolution: workspace
