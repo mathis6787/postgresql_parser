@@ -7,6 +7,10 @@ final class PostgresVersion {
   /// PostgreSQL 17 grammar.
   static const v17 = PostgresVersion._(17);
 
+  // Generated version constants are inserted below by tool/add_postgres_version.dart.
+  // BEGIN GENERATED VERSION CONSTANTS
+  // END GENERATED VERSION CONSTANTS
+
   /// The PostgreSQL major version number.
   final int major;
 

@@ -46,14 +46,43 @@ native build hook. The `serverpod_sql_check` package is still a placeholder.
 
 ## Adding a PostgreSQL major version
 
-Keep each grammar in its own native asset. To add version 18, pin and vendor
-a `libpg_query` 18 release under `native/pg18/`, add a version-prefixed C
-wrapper with the same response contract, and build it as a distinct code
-asset in `hook/build.dart`. Add the Dart backend and a `PostgresVersion.v18`
-constant, then run the shared parser tests plus version-specific syntax
-tests on macOS and Linux. The public `parse()` signature stays the same.
-Only the wrapper's exported symbols should be visible from each native
-library, so multiple grammars can coexist in one process.
+From `packages/postgresql_parser`, run the generator with a tagged
+`libpg_query` release:
+
+```sh
+dart run tool/add_postgres_version.dart --available
+dart run tool/add_postgres_version.dart --list-releases 18
+dart run tool/add_postgres_version.dart --list-tags 18
+dart run tool/add_postgres_version.dart 18 --latest
+```
+
+`--available` shows the newest published release for each PostgreSQL major
+version and whether that major is installed. `--list-releases 18` shows the
+published releases for PostgreSQL 18. `--list-tags 18` shows Git tags,
+including tags without a GitHub release.
+These listing commands need network access and do not change the repository.
+To choose a specific release, use `18 --tag <18-release-tag>` instead of
+`18 --latest`.
+
+The add command checks out the release tag, records its exact commit in
+`native/pg18/UPSTREAM.md`, generates protobuf C files if they are absent from
+the Git checkout, vendors the required source and licenses, and generates a
+version-prefixed C
+wrapper, native binding, Dart backend, `PostgresVersion.v18` constant, and
+registry entry. The build hook reads `native/versions.json` and builds each
+major version as a separate native asset. Application builds use the checked-in
+source and do not access the network.
+
+For a repeatable source check, pass `--expected-commit <full-git-sha>`; the
+generator stops if the release tag resolves elsewhere. Generating missing
+protobuf C files requires `protoc` and `protoc-gen-c` on `PATH`. You may supply
+an existing source archive with `--archive <local-tar.gz>` and verify it using
+`--expected-sha256 <digest>`. Run `--help` for the full command. The generator
+checks the upstream parse API shape, but a release
+can still require wrapper or build changes. Review the generated diff, add a
+syntax test specific to the new version, then run `dart analyze` and `dart test`
+on macOS and Linux. The shared tests automatically cover every registered
+version. The public `parse()` signature stays the same.
 
 The PostgreSQL 17 source pin and license details are in
 [`native/pg17/UPSTREAM.md`](packages/postgresql_parser/native/pg17/UPSTREAM.md).
