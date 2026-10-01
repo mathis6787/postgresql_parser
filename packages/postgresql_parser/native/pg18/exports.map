@@ -1,6 +1,7 @@
 {
   global:
     pgp18_parse;
+    pgp18_parse_plpgsql;
     pgp18_free_response;
   local:
     *;

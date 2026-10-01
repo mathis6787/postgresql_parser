@@ -649,6 +649,7 @@ dump_function(StringInfo out, PLpgSQL_function *node)
 		switch (d->dtype)
 		{
 			case PLPGSQL_DTYPE_VAR:
+			case PLPGSQL_DTYPE_PROMISE:
 				dump_var(out, (PLpgSQL_var *) d);
 				break;
 			case PLPGSQL_DTYPE_ROW:
@@ -698,6 +699,7 @@ dump_variable(StringInfo out, PLpgSQL_variable *node)
 			dump_record(out, (PLpgSQL_rec *) node);
 			break;
 		case PLPGSQL_DTYPE_VAR:
+		case PLPGSQL_DTYPE_PROMISE:
 			dump_var(out, (PLpgSQL_var *) node);
 			break;
 		case PLPGSQL_DTYPE_ROW:

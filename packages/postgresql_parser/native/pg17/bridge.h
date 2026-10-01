@@ -14,6 +14,7 @@ typedef struct Pg17ParseResponse {
 } Pg17ParseResponse;
 
 PGP17_EXPORT Pg17ParseResponse *pgp17_parse(const char *sql);
+PGP17_EXPORT Pg17ParseResponse *pgp17_parse_plpgsql(const char *sql);
 PGP17_EXPORT void pgp17_free_response(Pg17ParseResponse *response);
 
 #endif

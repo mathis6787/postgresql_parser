@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'ffigen.dart' show generateBindings;
+
 const _upstream = 'https://github.com/pganalyze/libpg_query.git';
 const _releasesApi =
     'https://api.github.com/repos/pganalyze/libpg_query/releases';
@@ -407,6 +409,7 @@ Future<void> _changeVersion(List<String> args) async {
       await _generateProtobufC(releaseSource);
     }
     _checkUpstream(releaseSource, runtime);
+    final patchedPlpgsql = await applyPlpgsqlCompatibilityFix(releaseSource);
 
     final staged = Directory('${temporary.path}/pg$major');
     final vendored = Directory('${staged.path}/libpg_query');
@@ -456,6 +459,13 @@ Future<void> _changeVersion(List<String> args) async {
     final checksumLine = archiveSha256 == null
         ? ''
         : '- Source archive SHA-256: `$archiveSha256`\n';
+    final patchNote = !patchedPlpgsql
+        ? ''
+        : '\n## Local compatibility patch\n\n'
+              '`src/pg_query_json_plpgsql.c` serializes '
+              '`PLPGSQL_DTYPE_PROMISE` with `dump_var`, matching its '
+              '`PLpgSQL_var` representation. This fixes malformed JSON '
+              'for trigger variables. The upstream pin is unchanged.\n';
     await File('${staged.path}/UPSTREAM.md')
         .writeAsString('''# Vendored PostgreSQL $major parser source
 
@@ -465,6 +475,7 @@ Future<void> _changeVersion(List<String> args) async {
 - Source: `$sourceDescription`
 - Protobuf runtime: `${runtime.directory}`
 $checksumLine
+$patchNote
 
 `libpg_query/` contains the checked-in source used by the native build. Its
 `LICENSE`, PostgreSQL `src/postgres/COPYRIGHT`, and vendored source license
@@ -477,70 +488,11 @@ notices are retained. Builds do not fetch source from the network.
       return;
     }
 
-    final backendTemplate = await File(
-      '$packageRoot/lib/src/backends/pg17.dart',
-    ).readAsString();
-    final nativeTemplate = await File('$packageRoot/lib/src/native/pg17.dart')
-        .readAsString();
-    final backendFile = File('$packageRoot/lib/src/backends/pg$major.dart');
-    final nativeFile = File('$packageRoot/lib/src/native/pg$major.dart');
-    if (backendFile.existsSync() || nativeFile.existsSync()) {
-      throw FormatException('Dart files for PostgreSQL $major already exist.');
-    }
-
-    final versionFile = File('$packageRoot/lib/src/postgres_version.dart');
-    final parserFile = File('$packageRoot/lib/src/postgres_parser.dart');
-    final oldVersion = await versionFile.readAsString();
-    final oldParser = await parserFile.readAsString();
-    final newVersion = _insert(
-      oldVersion,
-      'VERSION CONSTANTS',
-      '  /// PostgreSQL $major grammar.\n'
-          '  static const v$major = PostgresVersion._($major);\n',
+    await installStagedVersion(
+      staged: staged,
+      packageRoot: packageRoot,
+      major: major,
     );
-    var newParser = _insert(
-      oldParser,
-      'BACKEND IMPORTS',
-      "import 'backends/pg$major.dart';\n",
-    );
-    newParser = _insert(
-      newParser,
-      'SUPPORTED VERSIONS',
-      '    PostgresVersion.v$major,\n',
-    );
-    newParser = _insert(
-      newParser,
-      'BACKEND REGISTRY',
-      '    $major: Pg${major}Backend(),\n',
-    );
-    versions.add(major);
-    versions.sort();
-
-    final originals = <File, String>{
-      versionFile: oldVersion,
-      parserFile: oldParser,
-      versionsFile: await versionsFile.readAsString(),
-    };
-    try {
-      await staged.rename(target.path);
-      await backendFile.writeAsString(
-        backendTemplate.replaceAll('17', '$major'),
-      );
-      await nativeFile.writeAsString(nativeTemplate.replaceAll('17', '$major'));
-      await versionFile.writeAsString(newVersion);
-      await parserFile.writeAsString(newParser);
-      await versionsFile.writeAsString(
-        '${const JsonEncoder.withIndent('  ').convert(versions)}\n',
-      );
-    } catch (_) {
-      for (final entry in originals.entries) {
-        await entry.key.writeAsString(entry.value);
-      }
-      if (target.existsSync()) await target.delete(recursive: true);
-      if (backendFile.existsSync()) await backendFile.delete();
-      if (nativeFile.existsSync()) await nativeFile.delete();
-      rethrow;
-    }
 
     stdout.writeln('Added PostgreSQL $major from $tag ($commit).');
     stdout.writeln(
@@ -550,6 +502,108 @@ notices are retained. Builds do not fetch source from the network.
   } finally {
     await temporary.delete(recursive: true);
   }
+}
+
+/// Installs a staged bridge and source, rolling back if bindings cannot generate.
+Future<void> installStagedVersion({
+  required Directory staged,
+  required String packageRoot,
+  required int major,
+}) async {
+  final target = Directory('$packageRoot/native/pg$major');
+  final versionsFile = File('$packageRoot/native/versions.json');
+  final versions = (jsonDecode(await versionsFile.readAsString()) as List)
+      .cast<int>()
+      .toList();
+  if (target.existsSync() || versions.contains(major)) {
+    throw FormatException('PostgreSQL $major is already installed.');
+  }
+  final backendTemplate = await File('$packageRoot/lib/src/backends/pg17.dart')
+      .readAsString();
+  final backendFile = File('$packageRoot/lib/src/backends/pg$major.dart');
+  final nativeFile = File('$packageRoot/lib/src/native/pg$major.dart');
+  if (backendFile.existsSync() || nativeFile.existsSync()) {
+    throw FormatException('Dart files for PostgreSQL $major already exist.');
+  }
+
+  final versionFile = File('$packageRoot/lib/src/postgres_version.dart');
+  final parserFile = File('$packageRoot/lib/src/postgres_parser.dart');
+  final oldVersion = await versionFile.readAsString();
+  final oldParser = await parserFile.readAsString();
+  final newVersion = _insert(
+    oldVersion,
+    'VERSION CONSTANTS',
+    '  /// PostgreSQL $major grammar.\n'
+        '  static const v$major = PostgresVersion._($major);\n',
+  );
+  var newParser = _insert(
+    oldParser,
+    'BACKEND IMPORTS',
+    "import 'backends/pg$major.dart';\n",
+  );
+  newParser = _insert(
+    newParser,
+    'SUPPORTED VERSIONS',
+    '    PostgresVersion.v$major,\n',
+  );
+  newParser = _insert(
+    newParser,
+    'BACKEND REGISTRY',
+    '    $major: Pg${major}Backend(),\n',
+  );
+  versions.add(major);
+  versions.sort();
+
+  final originals = <File, String>{
+    versionFile: oldVersion,
+    parserFile: oldParser,
+    versionsFile: await versionsFile.readAsString(),
+  };
+  try {
+    await staged.rename(target.path);
+    await backendFile.writeAsString(backendTemplate.replaceAll('17', '$major'));
+    await generateBindings(
+      major: major,
+      header: File('${target.path}/bridge.h').uri,
+      output: nativeFile.uri,
+    );
+    await versionFile.writeAsString(newVersion);
+    await parserFile.writeAsString(newParser);
+    await versionsFile.writeAsString(
+      '${const JsonEncoder.withIndent('  ').convert(versions)}\n',
+    );
+  } catch (_) {
+    for (final entry in originals.entries) {
+      await entry.key.writeAsString(entry.value);
+    }
+    if (target.existsSync()) await target.delete(recursive: true);
+    if (backendFile.existsSync()) await backendFile.delete();
+    if (nativeFile.existsSync()) await nativeFile.delete();
+    rethrow;
+  }
+}
+
+/// Repairs serializers that omit promise datums used by trigger variables.
+/// Both ordinary variables and promise datums use the PLpgSQL_var struct.
+Future<bool> applyPlpgsqlCompatibilityFix(Directory source) async {
+  final serializer = File('${source.path}/src/pg_query_json_plpgsql.c');
+  final original = await serializer.readAsString();
+  final updated = original.replaceAllMapped(
+    RegExp(
+      r'^([\t ]*)((?:case PLPGSQL_DTYPE_(?:VAR|PROMISE):\n[\t ]*)+)'
+      r'dump_var\(out, \(PLpgSQL_var \*\) (?:d|node)\);',
+      multiLine: true,
+    ),
+    (match) => match[0]!.contains('case PLPGSQL_DTYPE_PROMISE:')
+        ? match[0]!
+        : match[0]!.replaceFirst(
+            'case PLPGSQL_DTYPE_VAR:\n',
+            'case PLPGSQL_DTYPE_VAR:\n${match[1]}case PLPGSQL_DTYPE_PROMISE:\n',
+          ),
+  );
+  if (updated == original) return false;
+  await serializer.writeAsString(updated);
+  return true;
 }
 
 Future<void> _updateInstalledVersion(
@@ -634,6 +688,8 @@ void _checkUpstream(Directory source, _ProtobufRuntime runtime) {
     'pg_query.h',
     'src/postgres/COPYRIGHT',
     'src/pg_query_parse.c',
+    'src/pg_query_parse_plpgsql.c',
+    'src/pg_query_json_plpgsql.c',
     'src/postgres/src_backend_parser_gram.c',
     'vendor/xxhash/xxhash.c',
     if (runtime == _ProtobufRuntime.protobufC) ...[
@@ -657,7 +713,9 @@ void _checkUpstream(Directory source, _ProtobufRuntime runtime) {
   }
   final header = File('${source.path}/pg_query.h').readAsStringSync();
   if (!header.contains('pg_query_parse(') ||
-      !header.contains('pg_query_free_parse_result(')) {
+      !header.contains('pg_query_free_parse_result(') ||
+      !header.contains('pg_query_parse_plpgsql(') ||
+      !header.contains('pg_query_free_plpgsql_parse_result(')) {
     throw const FormatException(
       'Upstream parse API changed; update the bridge manually.',
     );

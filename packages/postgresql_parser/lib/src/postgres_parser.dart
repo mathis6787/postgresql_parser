@@ -6,10 +6,11 @@ import 'backends/pg17.dart';
 import 'backends/pg18.dart';
 // END GENERATED BACKEND IMPORTS
 import 'parse_result.dart';
+import 'plpgsql_parse_result.dart';
 import 'postgres_parse_exception.dart';
 import 'postgres_version.dart';
 
-/// Parses SQL using an explicitly selected PostgreSQL major version.
+/// Parses SQL and PL/pgSQL using an explicitly selected PostgreSQL major version.
 final class PostgresParser {
   PostgresParser({required this.version})
     : _backend =
@@ -50,5 +51,32 @@ final class PostgresParser {
       throw StateError('Native parser returned an unexpected JSON tree.');
     }
     return ParseResult(version: version, tree: decoded, rawJson: rawJson);
+  }
+
+  /// Parses PL/pgSQL definitions in a SQL script into the upstream JSON list.
+  ///
+  /// Accepts complete `CREATE FUNCTION`, `CREATE PROCEDURE`, and `DO`
+  /// statements. Bare procedural bodies must be wrapped by the caller.
+  /// Ordinary SQL statements do not produce entries. Supported constructs and
+  /// output fields follow the selected upstream version.
+  ///
+  /// Throws [PostgresParseException] for upstream parsing errors. Cursor
+  /// positions are preserved as reported; they may refer to a function body
+  /// rather than the entire script, or be zero when unavailable.
+  ///
+  /// This does not execute code, validate database objects or runtime behavior,
+  /// or inspect dynamically constructed SQL.
+  PlpgsqlParseResult parsePlpgsql(String sql) {
+    final rawJson = _backend.parsePlpgsqlRaw(sql);
+    final decoded = jsonDecode(rawJson);
+    if (decoded is! List ||
+        decoded.any((entry) => entry is! Map<String, dynamic>)) {
+      throw StateError('Native parser returned an unexpected PL/pgSQL tree.');
+    }
+    return PlpgsqlParseResult(
+      version: version,
+      tree: decoded.cast<Map<String, dynamic>>(),
+      rawJson: rawJson,
+    );
   }
 }

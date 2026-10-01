@@ -15,9 +15,11 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: 3.13.4
-      - run: sudo apt-get update && sudo apt-get install -y clang
+      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
         if: runner.os == 'Linux'
       - run: dart pub get
       - run: dart analyze
+      - run: dart run tool/ffigen.dart --check
+        working-directory: packages/postgresql_parser
       - run: dart test
         working-directory: packages/postgresql_parser

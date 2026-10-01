@@ -81,6 +81,7 @@ Future<void> buildVersion(
   final exportFlags = os == OS.macOS
       ? [
           '-Wl,-exported_symbol,_pgp${version}_parse',
+          '-Wl,-exported_symbol,_pgp${version}_parse_plpgsql',
           '-Wl,-exported_symbol,_pgp${version}_free_response',
         ]
       : [
