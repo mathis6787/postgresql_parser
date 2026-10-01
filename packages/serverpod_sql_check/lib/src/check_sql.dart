@@ -1,12 +1,14 @@
 /// Checks SQL with the local postgresql_parser package, without executing it.
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:analyzer/dart/ast/ast.dart';
 import 'package:analyzer/dart/ast/visitor.dart';
 import 'package:analyzer/dart/analysis/utilities.dart';
 import 'package:serverpod_sql_check/src/string_references.dart';
+import 'package:serverpod_sql_check/src/server_discovery.dart';
 import 'package:postgresql_parser/postgresql_parser.dart';
 
 final _sqlStart = RegExp(
@@ -16,12 +18,12 @@ final _parameter = RegExp(r'@[A-Za-z_][A-Za-z_0-9]*');
 final _dollarQuote = RegExp(r'\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$');
 const _rawMethods = {'unsafeQuery', 'unsafeExecute'};
 
-/// Checks SQL and bindings, prints diagnostics, and sets [exitCode] on failure.
+/// Checks SQL, PL/pgSQL, and bindings, and sets [exitCode] on failure.
 void checkSql(List<String> args) {
   var includeMigrations = false;
   var verbose = false;
   var major = 17;
-  var root = Directory.current.path;
+  String? explicitRoot;
   final paths = <String>[];
   for (final arg in args) {
     if (arg == '--help' || arg == '-h') {
@@ -30,8 +32,10 @@ void checkSql(List<String> args) {
         '  --include-migrations    Include migration SQL (excluded by default)\n'
         '  --postgres-version=17   PostgreSQL grammar: 17 (default) or 18\n'
         '  --verbose               Print checked and skipped query locations\n'
-        '  --root=<directory>      Project to scan by default (current directory)\n'
-        'With no paths, scan the server directory. Dynamic SQL is reported as skipped.\n'
+        '  --root=<directory>      Explicit scan root; overrides server discovery\n'
+        'With no paths or root, detect a server by its serverpod dependency.\n'
+        'Multiple servers or no server require --root. Dynamic SQL is skipped.\n'
+        'PL/pgSQL function, procedure, and DO bodies are checked automatically.\n'
         'Named parameter bindings are checked when map keys are statically readable.',
       );
       return;
@@ -42,7 +46,7 @@ void checkSql(List<String> args) {
     } else if (arg.startsWith('--postgres-version=')) {
       major = int.tryParse(arg.split('=').last) ?? -1;
     } else if (arg.startsWith('--root=')) {
-      root = arg.substring('--root='.length);
+      explicitRoot = arg.substring('--root='.length);
     } else if (arg.startsWith('-')) {
       stderr.writeln('Unknown option: $arg. Use --help.');
       exitCode = 2;
@@ -61,6 +65,25 @@ void checkSql(List<String> args) {
     );
     exitCode = 2;
     return;
+  }
+  final String root;
+  try {
+    root = resolveScanRoot(
+      currentDirectory: Directory.current,
+      explicitRoot: explicitRoot,
+      hasPaths: paths.isNotEmpty,
+    ).path;
+  } on ServerDiscoveryException catch (error) {
+    stderr.writeln('ERROR: $error');
+    exitCode = 2;
+    return;
+  } on FileSystemException catch (error) {
+    stderr.writeln('ERROR: $error');
+    exitCode = 2;
+    return;
+  }
+  if (explicitRoot == null && paths.isEmpty) {
+    stdout.writeln('Detected Serverpod server: $root');
   }
   final parser = PostgresParser(version: versions.single);
   final files = <String, File>{};
@@ -86,6 +109,8 @@ void checkSql(List<String> args) {
   var bindingsSkipped = 0;
   var sqlFiles = 0;
   var dartFiles = 0;
+  var plpgsqlChecked = 0;
+  var plpgsqlFailed = 0;
   final sortedFiles = files.values.toList()
     ..sort((a, b) => a.path.compareTo(b.path));
   stdout.writeln(
@@ -160,8 +185,44 @@ void checkSql(List<String> args) {
           }
           checked++;
           try {
-            parser.parse(sql);
-            if (verbose && !missingBindings) stdout.writeln('OK $variantLabel');
+            final result = parser.parse(sql);
+            var bodyFailed = false;
+            for (final definition in _plpgsqlStatements(result, prepared)) {
+              final statement = definition.sql;
+              plpgsqlChecked++;
+              try {
+                // Older upstream compilers assert when a definition has no AS
+                // body. Diagnose it before calling the native PL/pgSQL parser.
+                if (!definition.hasBody) {
+                  throw PostgresParseException(
+                    version: parser.version,
+                    message: 'definition requires an AS body',
+                    cursorPosition: 0,
+                  );
+                }
+                parser.parsePlpgsql(statement.text);
+              } on PostgresParseException catch (error) {
+                bodyFailed = true;
+                plpgsqlFailed++;
+                _reportSqlFailure(
+                  _displayPath(file.absolute.path, root),
+                  source,
+                  statement.offsets?.firstOrNull ?? block.offset,
+                  statement,
+                  null,
+                  'PL/pgSQL: ${error.message}',
+                  block.variants!.length > 1 ? ' (variant ${variant + 1})' : '',
+                  positionDetail: error.cursorPosition > 0
+                      ? 'PL/pgSQL parser position ${error.cursorPosition}'
+                      : 'PL/pgSQL parser provided no error position',
+                  blockLocationNote: 'PL/pgSQL block starts here',
+                );
+              }
+            }
+            if (bodyFailed) failed++;
+            if (verbose && !missingBindings && !bodyFailed) {
+              stdout.writeln('OK $variantLabel');
+            }
           } on PostgresParseException catch (error) {
             // CTE helpers deliberately contain only a WITH clause. Complete that
             // fragment to validate its grammar; raw calls require a full query.
@@ -197,6 +258,7 @@ void checkSql(List<String> args) {
   stdout.writeln(
     'Scanned $sqlFiles SQL files and $dartFiles Dart files.\n'
     'Checked $checked SQL variants; $failed failed; $skipped dynamic queries/templates skipped.\n'
+    'Checked $plpgsqlChecked PL/pgSQL definitions; $plpgsqlFailed failed.\n'
     'Checked $bindingsChecked named parameter sets; $bindingFailures missing bindings; '
     '$bindingsSkipped binding checks skipped.',
   );
@@ -209,6 +271,60 @@ void checkSql(List<String> args) {
     exitCode = 2;
   } else if (failed > 0 || bindingFailures > 0) {
     exitCode = 1;
+  }
+}
+
+// Use the SQL tree to select the language, rather than matching text inside
+// comments or strings. Parse each definition separately so unrelated function
+// languages cannot affect PL/pgSQL checks and failures do not hide later bodies.
+Iterable<({_SqlText sql, bool hasBody})> _plpgsqlStatements(
+  ParseResult result,
+  _SqlText sql,
+) sync* {
+  final bytes = utf8.encode(sql.text);
+  for (final raw in result.tree['stmts'] as List) {
+    final statement = raw as Map<String, dynamic>;
+    final node = statement['stmt'] as Map<String, dynamic>;
+    final function = node['CreateFunctionStmt'] as Map<String, dynamic>?;
+    final inline = node['DoStmt'] as Map<String, dynamic>?;
+    if (function == null && inline == null) continue;
+    final options =
+        (function?['options'] ?? inline?['args'] ?? const []) as List;
+    var language = inline == null ? null : 'plpgsql';
+    var hasBody = false;
+    for (final option in options) {
+      final definition = (option as Map)['DefElem'] as Map;
+      if (definition['defname'] == 'language') {
+        language =
+            ((definition['arg'] as Map)['String'] as Map)['sval'] as String;
+      }
+      if (definition['defname'] == 'as') hasBody = true;
+    }
+    if (language != 'plpgsql') continue;
+
+    // PostgreSQL locations count UTF-8 bytes; Dart text and the origin map count
+    // UTF-16 code units. Convert before slicing, including after Unicode text.
+    final location = statement['stmt_location'] as int? ?? 0;
+    final length = statement['stmt_len'] as int? ?? 0;
+    final start = utf8.decode(bytes.sublist(0, location)).length;
+    final end = length == 0
+        ? sql.text.length
+        : start +
+              utf8.decode(bytes.sublist(location, location + length)).length;
+    final leading = RegExp(r'^\s*')
+        .firstMatch(sql.text.substring(start, end))!
+        .end;
+    final trimmedStart = start + leading;
+    yield (
+      sql: _SqlText(
+        sql.text.substring(trimmedStart, end),
+        sql.offsets?.sublist(trimmedStart, end),
+        sql.offsets != null && end < sql.text.length
+            ? sql.offsets![end]
+            : sql.endOffset,
+      ),
+      hasBody: hasBody,
+    );
   }
 }
 
@@ -634,8 +750,10 @@ void _reportSqlFailure(
   _SqlText sql,
   int? sqlOffset,
   String message,
-  String variant,
-) {
+  String variant, {
+  String? positionDetail,
+  String blockLocationNote = 'SQL block starts here',
+}) {
   final hasCursor = sqlOffset != null;
   final prefix = hasCursor ? sql.text.substring(0, sqlOffset) : '';
   final exact = hasCursor && sql.offsets != null;
@@ -649,10 +767,12 @@ void _reportSqlFailure(
   final sqlLine = '\n'.allMatches(prefix).length + 1;
   final sqlColumn =
       prefix.substring(prefix.lastIndexOf('\n') + 1).runes.length + 1;
-  final detail = hasCursor
-      ? 'SQL line $sqlLine, column $sqlColumn'
-      : 'parser provided no error position';
-  final locationNote = exact ? '' : '; SQL block starts here';
+  final detail =
+      positionDetail ??
+      (hasCursor
+          ? 'SQL line $sqlLine, column $sqlColumn'
+          : 'parser provided no error position');
+  final locationNote = exact ? '' : '; $blockLocationNote';
   stderr.writeln(
     'FAIL $path:$line:$column$variant: $message ($detail$locationNote)',
   );
