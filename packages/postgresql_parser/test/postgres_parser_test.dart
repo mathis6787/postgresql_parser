@@ -69,4 +69,12 @@ void main() {
       throwsA(isA<PostgresParseException>()),
     );
   });
+
+  test('PostgreSQL 18 accepts RETURNING WITH syntax', () {
+    final parser = PostgresParser(version: PostgresVersion.v18);
+    final result = parser.parse(
+      'UPDATE t SET x = 1 RETURNING WITH (OLD AS o) o.x',
+    );
+    expect(result.tree['stmts'], hasLength(1));
+  });
 }

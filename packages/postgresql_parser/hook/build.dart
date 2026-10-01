@@ -37,10 +37,31 @@ Future<void> buildVersion(
   final sourceDirs = ['$base/src', '$base/src/postgres'];
   final sources = <String>[
     'native/pg$version/bridge.c',
-    '$base/vendor/protobuf-c/protobuf-c.c',
     '$base/vendor/xxhash/xxhash.c',
-    '$base/protobuf/pg_query.pb-c.c',
   ];
+  final upb = File.fromUri(input.packageRoot.resolve('$base/vendor/upb/upb.c'));
+  final includes = <String>[
+    base,
+    '$base/vendor',
+    '$base/src/include',
+    '$base/src/postgres/include',
+  ];
+  if (upb.existsSync()) {
+    sources.addAll([
+      '$base/vendor/upb/upb.c',
+      '$base/vendor/upb/third_party/utf8_range/utf8_range.c',
+      '$base/protobuf/pg_query.upb_minitable.c',
+    ]);
+    includes.addAll([
+      '$base/vendor/upb',
+      '$base/vendor/upb/third_party/utf8_range',
+    ]);
+  } else {
+    sources.addAll([
+      '$base/vendor/protobuf-c/protobuf-c.c',
+      '$base/protobuf/pg_query.pb-c.c',
+    ]);
+  }
 
   for (final relativeDir in sourceDirs) {
     final directory = Directory.fromUri(
@@ -75,12 +96,7 @@ Future<void> buildVersion(
     name: 'pg_query_$version',
     assetName: 'src/native/pg$version.dart',
     sources: sources,
-    includes: [
-      base,
-      '$base/vendor',
-      '$base/src/include',
-      '$base/src/postgres/include',
-    ],
+    includes: includes,
     flags: [
       '-fno-strict-aliasing',
       '-fwrapv',

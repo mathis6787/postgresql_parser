@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'backends/backend.dart';
 import 'backends/pg17.dart';
 // BEGIN GENERATED BACKEND IMPORTS
+import 'backends/pg18.dart';
 // END GENERATED BACKEND IMPORTS
 import 'parse_result.dart';
 import 'postgres_parse_exception.dart';
@@ -23,12 +24,14 @@ final class PostgresParser {
   static const supportedVersions = [
     PostgresVersion.v17,
     // BEGIN GENERATED SUPPORTED VERSIONS
+    PostgresVersion.v18,
     // END GENERATED SUPPORTED VERSIONS
   ];
 
   static const Map<int, ParserBackend> _backends = {
     17: Pg17Backend(),
     // BEGIN GENERATED BACKEND REGISTRY
+    18: Pg18Backend(),
     // END GENERATED BACKEND REGISTRY
   };
 

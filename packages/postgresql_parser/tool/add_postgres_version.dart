@@ -366,8 +366,11 @@ Future<void> _addVersion(List<String> args) async {
       }
       releaseSource = source;
     }
-    await _generateProtobufC(releaseSource);
-    _checkUpstream(releaseSource);
+    final runtime = _detectRuntime(releaseSource);
+    if (runtime == _ProtobufRuntime.protobufC) {
+      await _generateProtobufC(releaseSource);
+    }
+    _checkUpstream(releaseSource, runtime);
 
     final staged = Directory('${temporary.path}/pg$major');
     final vendored = Directory('${staged.path}/libpg_query');
@@ -388,12 +391,18 @@ Future<void> _addVersion(List<String> args) async {
         releaseSource,
       );
     }
-    for (final path in [
-      'vendor/protobuf-c/protobuf-c.c',
-      'vendor/protobuf-c/protobuf-c.h',
-      'vendor/xxhash/xxhash.c',
-      'vendor/xxhash/xxhash.h',
-    ]) {
+    final scanTokensHeader = File(
+      '${releaseSource.path}/pg_query_scan_tokens.h',
+    );
+    if (scanTokensHeader.existsSync()) {
+      await _copy(scanTokensHeader, vendored, releaseSource);
+    }
+    await _copy(
+      Directory('${releaseSource.path}/vendor/${runtime.directory}'),
+      vendored,
+      releaseSource,
+    );
+    for (final path in ['vendor/xxhash/xxhash.c', 'vendor/xxhash/xxhash.h']) {
       await _copy(File('${releaseSource.path}/$path'), vendored, releaseSource);
     }
 
@@ -414,6 +423,7 @@ Future<void> _addVersion(List<String> args) async {
 - Release tag: [`$tag`](https://github.com/pganalyze/libpg_query/releases/tag/$tag)
 - Commit: `$commit`
 - Source: `$sourceDescription`
+- Protobuf runtime: `${runtime.directory}`
 $checksumLine
 
 `libpg_query/` contains the checked-in source used by the native build. Its
@@ -496,16 +506,47 @@ notices are retained. Builds do not fetch source from the network.
   }
 }
 
-void _checkUpstream(Directory source) {
+enum _ProtobufRuntime {
+  protobufC('protobuf-c'),
+  upb('upb');
+
+  const _ProtobufRuntime(this.directory);
+  final String directory;
+}
+
+_ProtobufRuntime _detectRuntime(Directory source) {
+  if (File('${source.path}/vendor/upb/upb.c').existsSync()) {
+    return _ProtobufRuntime.upb;
+  }
+  if (File('${source.path}/vendor/protobuf-c/protobuf-c.c').existsSync()) {
+    return _ProtobufRuntime.protobufC;
+  }
+  throw const FormatException(
+    'Unknown libpg_query Protobuf runtime. Update the native build hook for '
+    'this release before adding it.',
+  );
+}
+
+void _checkUpstream(Directory source, _ProtobufRuntime runtime) {
   for (final path in [
     'LICENSE',
     'pg_query.h',
     'src/postgres/COPYRIGHT',
     'src/pg_query_parse.c',
     'src/postgres/src_backend_parser_gram.c',
-    'protobuf/pg_query.pb-c.c',
-    'vendor/protobuf-c/protobuf-c.c',
     'vendor/xxhash/xxhash.c',
+    if (runtime == _ProtobufRuntime.protobufC) ...[
+      'protobuf/pg_query.pb-c.c',
+      'protobuf/pg_query.pb-c.h',
+      'vendor/protobuf-c/protobuf-c.c',
+    ] else ...[
+      'protobuf/pg_query.upb.h',
+      'protobuf/pg_query.upb_minitable.c',
+      'protobuf/pg_query.upb_minitable.h',
+      'vendor/upb/upb.c',
+      'vendor/upb/third_party/utf8_range/utf8_range.c',
+      'pg_query_scan_tokens.h',
+    ],
   ]) {
     if (!File('${source.path}/$path').existsSync()) {
       throw FormatException(
