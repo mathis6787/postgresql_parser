@@ -2,7 +2,8 @@
 
 This package is developed in a Dart pub workspace. Run repository commands from
 the workspace root, and parser commands from `packages/postgresql_parser` as
-shown below. `packages/serverpod_sql_check` is a separate placeholder package.
+shown below. `packages/serverpod_sql_check` contains the separate Serverpod SQL checker;
+see its [README](../serverpod_sql_check/README.md) for commands and tests.
 
 ## Set up the workspace
 
@@ -153,7 +154,7 @@ first release:
 - Add a package-root `CHANGELOG.md` and confirm the intended version.
 - Set the package's repository and issue-tracker metadata in `pubspec.yaml`.
 - Remove `publish_to: none` from the parser package when preparing to publish.
-  Keep it on the workspace root and the unpublished placeholder package.
+  Keep it on the workspace root and the unpublished `serverpod_sql_check` package.
 - Verify the README examples and all checks on macOS and Linux.
 
 Then inspect the publication with:

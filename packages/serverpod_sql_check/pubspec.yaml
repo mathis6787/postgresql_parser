@@ -1,5 +1,5 @@
 name: serverpod_sql_check
-description: Static SQL checking utilities for Serverpod, built on top of postgresql_parser (implementation to come).
+description: Static SQL syntax and named parameter binding checks for Dart and Serverpod projects.
 version: 0.1.0
 publish_to: none
 
@@ -7,3 +7,13 @@ environment:
   sdk: ^3.13.4
 
 resolution: workspace
+
+dependencies:
+  analyzer: '>=13.3.0 <15.0.0'
+  postgresql_parser: ^0.1.0
+
+dev_dependencies:
+  test: ^1.32.0
+
+executables:
+  serverpod_sql_check:

@@ -23,3 +23,5 @@ jobs:
         working-directory: packages/postgresql_parser
       - run: dart test
         working-directory: packages/postgresql_parser
+      - run: dart test --concurrency=1 --timeout=3m
+        working-directory: packages/serverpod_sql_check
