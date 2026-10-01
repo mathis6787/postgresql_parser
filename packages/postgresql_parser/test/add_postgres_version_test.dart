@@ -48,4 +48,21 @@ void main() {
       await temporary.delete(recursive: true);
     }
   });
+
+  test('updating an installed version to its current pin is a no-op', () async {
+    final upstream = await File('native/pg18/UPSTREAM.md').readAsString();
+    final pin = RegExp(r'- Release tag: \[`([^`]+)`\]')
+        .firstMatch(upstream)!
+        .group(1)!;
+    final result = await Process.run(Platform.resolvedExecutable, [
+      'tool/add_postgres_version.dart',
+      '18',
+      '--update',
+      '--tag',
+      pin,
+    ]);
+
+    expect(result.exitCode, 0, reason: '${result.stdout}${result.stderr}');
+    expect(result.stdout, contains('already pinned to $pin'));
+  });
 }

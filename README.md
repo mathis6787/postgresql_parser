@@ -65,6 +65,19 @@ To choose a specific release, use `18 --tag <18-release-tag>` instead of
 `18 --latest`. The generator refuses a major version that is already installed;
 the `18 --latest` example above was used to create the checked-in 18 backend.
 
+To update an installed major to a newer `libpg_query` release, add `--update`:
+
+```sh
+dart run tool/add_postgres_version.dart 18 --update --latest
+```
+
+The update keeps that major's C wrapper, Dart backend, and public API. It
+replaces only its vendored upstream source and source pin, then runs
+`dart analyze` and `dart test`. If validation fails, it restores the previous
+source and pin. It refuses to overwrite uncommitted changes to those files.
+When the installed pin is already the requested tag, it makes no changes.
+Review the diff and run the tests on both macOS and Linux before publishing.
+
 The add command checks out the release tag, records its exact commit in
 `native/pg18/UPSTREAM.md`, detects the upstream `protobuf-c` or `upb` runtime,
 vendors the required source and licenses, and generates a version-prefixed C

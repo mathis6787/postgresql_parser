@@ -13,7 +13,7 @@ Future<void> main(List<String> args) async {
       '  dart run tool/add_postgres_version.dart --list-tags <major>\n'
       '  dart run tool/add_postgres_version.dart --list-releases <major>\n'
       '  dart run tool/add_postgres_version.dart <major> '
-      '(--tag <libpg_query-tag> | --latest) '
+      '[--update] (--tag <libpg_query-tag> | --latest) '
       '[--expected-commit <40-character-sha>] '
       '[--expected-sha256 <64-character-sha>] '
       '[--archive <release-tar.gz>] '
@@ -44,7 +44,7 @@ Future<void> main(List<String> args) async {
         _releasesJsonOption(args.skip(2).toList()),
       );
     } else {
-      await _addVersion(args);
+      await _changeVersion(args);
     }
   } on FormatException catch (error) {
     stderr.writeln(error.message);
@@ -232,7 +232,7 @@ Future<void> _showAvailable(String? jsonFile) async {
   }
 }
 
-Future<void> _addVersion(List<String> args) async {
+Future<void> _changeVersion(List<String> args) async {
   if (args.isEmpty) {
     throw const FormatException(
       'Missing PostgreSQL major version. Use --help.',
@@ -241,8 +241,14 @@ Future<void> _addVersion(List<String> args) async {
   final major = _parseMajor(args.first);
   final options = <String, String>{};
   var useLatest = false;
+  var update = false;
   for (var i = 1; i < args.length; i++) {
     final option = args[i];
+    if (option == '--update') {
+      if (update) throw const FormatException('Duplicate --update option.');
+      update = true;
+      continue;
+    }
     if (option == '--latest') {
       if (useLatest) throw const FormatException('Duplicate --latest option.');
       useLatest = true;
@@ -297,15 +303,45 @@ Future<void> _addVersion(List<String> args) async {
 
   final packageRoot = Platform.script.resolve('../').toFilePath();
   final target = Directory('$packageRoot/native/pg$major');
-  if (target.existsSync()) {
-    throw FormatException('PostgreSQL $major already exists: ${target.path}');
-  }
   final versionsFile = File('$packageRoot/native/versions.json');
   final versions = (jsonDecode(await versionsFile.readAsString()) as List)
       .cast<int>()
       .toList();
-  if (versions.contains(major)) {
-    throw FormatException('PostgreSQL $major is already registered.');
+  if (update) {
+    if (!target.existsSync() || !versions.contains(major)) {
+      throw FormatException(
+        'PostgreSQL $major is not installed. Omit --update to add it.',
+      );
+    }
+    final upstreamFile = File('${target.path}/UPSTREAM.md');
+    final pin = RegExp(r'- Release tag: \[`([^`]+)`\]')
+        .firstMatch(await upstreamFile.readAsString())
+        ?.group(1);
+    if (pin == candidateTags.first) {
+      stdout.writeln('PostgreSQL $major is already pinned to $pin.');
+      return;
+    }
+    final dirty = await _run('git', [
+      '-C',
+      packageRoot,
+      'status',
+      '--porcelain',
+      '--',
+      'native/pg$major/libpg_query',
+      'native/pg$major/UPSTREAM.md',
+    ]);
+    if (dirty.trim().isNotEmpty) {
+      throw FormatException(
+        'PostgreSQL $major vendored source or pin has uncommitted changes. '
+        'Commit or set them aside before updating.',
+      );
+    }
+  } else {
+    if (target.existsSync() || versions.contains(major)) {
+      throw FormatException(
+        'PostgreSQL $major is already installed. Use --update to change its pin.',
+      );
+    }
   }
 
   final temporary = await Directory.systemTemp.createTemp('pg-parser-version-');
@@ -406,11 +442,15 @@ Future<void> _addVersion(List<String> args) async {
       await _copy(File('${releaseSource.path}/$path'), vendored, releaseSource);
     }
 
-    final pg17 = Directory('$packageRoot/native/pg17');
+    final templateDirectory = update
+        ? target
+        : Directory('$packageRoot/native/pg17');
     for (final filename in ['bridge.c', 'bridge.h', 'exports.map']) {
-      final template = await File('${pg17.path}/$filename').readAsString();
-      await File('${staged.path}/$filename')
-          .writeAsString(template.replaceAll('17', '$major'));
+      final template = await File('${templateDirectory.path}/$filename')
+          .readAsString();
+      await File(
+        '${staged.path}/$filename',
+      ).writeAsString(update ? template : template.replaceAll('17', '$major'));
     }
     final sourceDescription = archiveOption ?? 'Git tag checkout: $repository';
     final checksumLine = archiveSha256 == null
@@ -430,6 +470,12 @@ $checksumLine
 `LICENSE`, PostgreSQL `src/postgres/COPYRIGHT`, and vendored source license
 notices are retained. Builds do not fetch source from the network.
 ''');
+
+    if (update) {
+      await _updateInstalledVersion(target, staged, packageRoot, major);
+      stdout.writeln('Updated PostgreSQL $major to $tag ($commit).');
+      return;
+    }
 
     final backendTemplate = await File(
       '$packageRoot/lib/src/backends/pg17.dart',
@@ -503,6 +549,61 @@ notices are retained. Builds do not fetch source from the network.
     stdout.writeln('Add a PostgreSQL $major syntax test before release.');
   } finally {
     await temporary.delete(recursive: true);
+  }
+}
+
+Future<void> _updateInstalledVersion(
+  Directory target,
+  Directory staged,
+  String packageRoot,
+  int major,
+) async {
+  final installedSource = Directory('${target.path}/libpg_query');
+  final installedPin = File('${target.path}/UPSTREAM.md');
+  if (!installedSource.existsSync() || !installedPin.existsSync()) {
+    throw FormatException('PostgreSQL $major installation is incomplete.');
+  }
+
+  final oldPin = await installedPin.readAsString();
+  final newPin = await File('${staged.path}/UPSTREAM.md').readAsString();
+  final exchange = await target.parent.createTemp('.pg$major-update-');
+  final replacement = Directory('${exchange.path}/replacement');
+  final previous = Directory('${exchange.path}/previous');
+  var movedPrevious = false;
+  var validated = false;
+  try {
+    await replacement.create();
+    final source = Directory('${staged.path}/libpg_query');
+    await _copy(source, replacement, source);
+    await installedSource.rename(previous.path);
+    movedPrevious = true;
+    await replacement.rename(installedSource.path);
+    await installedPin.writeAsString(newPin);
+
+    stdout.writeln(
+      'Validating PostgreSQL $major with dart analyze and dart test.',
+    );
+    await _run(Platform.resolvedExecutable, [
+      'analyze',
+    ], workingDirectory: packageRoot);
+    await _run(Platform.resolvedExecutable, [
+      'test',
+    ], workingDirectory: packageRoot);
+    validated = true;
+  } catch (_) {
+    if (movedPrevious) {
+      if (installedSource.existsSync()) {
+        await installedSource.delete(recursive: true);
+      }
+      await previous.rename(installedSource.path);
+      await installedPin.writeAsString(oldPin);
+    }
+    rethrow;
+  } finally {
+    // Keep the original source on disk if restoring it failed.
+    if (exchange.existsSync() && (validated || !previous.existsSync())) {
+      await exchange.delete(recursive: true);
+    }
   }
 }
 
@@ -661,8 +762,16 @@ String _insert(String source, String section, String addition) {
   );
 }
 
-Future<String> _run(String executable, List<String> arguments) async {
-  final result = await Process.run(executable, arguments);
+Future<String> _run(
+  String executable,
+  List<String> arguments, {
+  String? workingDirectory,
+}) async {
+  final result = await Process.run(
+    executable,
+    arguments,
+    workingDirectory: workingDirectory,
+  );
   if (result.exitCode != 0) {
     throw ProcessException(
       executable,
