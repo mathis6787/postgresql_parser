@@ -296,6 +296,47 @@ void main() {
     staticStringTests(() => fixture, run);
     staticObjectSafetyTests(() => fixture, run);
 
+    test(
+      'database configuration errors do not expose supplied credentials',
+      () async {
+        final server = package('backend');
+        for (final args in [
+          ['--database-url-env=SQL_CHECK_URL'],
+          ['--database-search-path=public'],
+          ['--database-check', '--database-url-env='],
+          ['--database-check', '--database-url-env=invalid-name'],
+          ['--database-check', '--database-search-path='],
+          ['--database-check', '--postgres-version=19'],
+        ]) {
+          final result = await run(server, args);
+          expect(result.exitCode, 2);
+        }
+        for (final url in [
+          '',
+          'postgresql://private_user:private_password@localhost/db?unknown=private_password',
+        ]) {
+          final result = await Process.run(
+            executable,
+            ['--database-check'],
+            workingDirectory: server.path,
+            environment: {
+              ...Platform.environment,
+              'SQL_CHECK_DATABASE_URL': url,
+            },
+          );
+          expect(result.exitCode, 2);
+          expect(
+            '${result.stdout}\n${result.stderr}',
+            isNot(contains('private_password')),
+          );
+          expect(
+            '${result.stdout}\n${result.stderr}',
+            isNot(contains('private_user')),
+          );
+        }
+      },
+    );
+
     for (final testFolder in ['test', 'integration_test']) {
       test('excludes $testFolder SQL and Dart during discovery', () async {
         final server = package('backend');
@@ -470,6 +511,7 @@ void main() {
         expect(help.exitCode, 0);
         expect(help.stdout, contains('overrides server discovery'));
         expect(help.stdout, contains('--include-tests'));
+        expect(help.stdout, contains('--database-check'));
       },
     );
   });

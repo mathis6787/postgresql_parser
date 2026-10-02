@@ -12,7 +12,7 @@ usage, supported platforms, and API limitations.
 | Directory | Purpose |
 | --- | --- |
 | `packages/postgresql_parser` | The native parser package intended for publication on pub.dev |
-| `packages/serverpod_sql_check` | Serverpod SQL syntax checker, Dart extraction, named binding checks, CLI, and tests |
+| `packages/serverpod_sql_check` | SQL syntax and optional database schema checks, Dart extraction, named binding checks, CLI, and tests |
 
 This repository uses a Dart pub workspace. The workspace root is not a
 publishable package.
@@ -32,7 +32,13 @@ dart pub get
 dart run serverpod_sql_check --root=/path/to/server --verbose
 ```
 
-Migration directories are excluded by default. Dynamic SQL and parameter maps
+Test and migration directories are excluded by default. Dynamic SQL and parameter maps
 that cannot be read statically are reported as skipped.
 Inside a Serverpod project, the checker detects the server from its
 `pubspec.yaml` dependency on `serverpod`; `--root` overrides discovery.
+
+To also analyze custom queries against a prepared PostgreSQL 17/18 test schema,
+set `SQL_CHECK_DATABASE_URL` to a disposable database and add `--database-check`.
+The checker prepares supported queries without executing them; your project or
+CI applies migrations and custom schema setup separately. See the CLI package
+README for configuration, coverage, and limitations.

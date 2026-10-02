@@ -15,6 +15,8 @@ import 'package:serverpod_sql_check/src/static_value.dart';
 import 'package:serverpod_sql_check/src/static_contexts.dart';
 import 'package:serverpod_sql_check/src/static_demand.dart';
 import 'package:serverpod_sql_check/src/server_discovery.dart';
+import 'package:serverpod_sql_check/src/database_check.dart';
+import 'package:serverpod_sql_check/src/sql_parameters.dart';
 import 'package:postgresql_parser/postgresql_parser.dart';
 
 const _sqlKeywords = [
@@ -48,16 +50,19 @@ final _sqlStart = RegExp(
   '${_sqlKeywords.join('|')}'
   r')\s+',
 );
-final _parameter = RegExp(r'@[A-Za-z_][A-Za-z_0-9]*');
-final _dollarQuote = RegExp(r'\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$');
 const _rawMethods = {'unsafeQuery', 'unsafeExecute'};
 
 /// Checks SQL, PL/pgSQL, and bindings, and sets [exitCode] on failure.
-void checkSql(List<String> args) {
+Future<void> checkSql(List<String> args) async {
   var includeMigrations = false;
   var includeTests = false;
   var verbose = false;
   var major = 17;
+  var explicitVersion = false;
+  var databaseCheck = false;
+  var databaseUrlEnv = 'SQL_CHECK_DATABASE_URL';
+  String? databaseSearchPath;
+  var databaseOption = false;
   String? explicitRoot;
   final paths = <String>[];
   for (final arg in args) {
@@ -67,11 +72,15 @@ void checkSql(List<String> args) {
         '  --include-migrations    Include migration SQL (excluded by default)\n'
         '  --include-tests         Include test/ and integration_test/ (excluded by default)\n'
         '  --postgres-version=17   PostgreSQL grammar: 17 (default) or 18\n'
+        '  --database-check        Analyze supported SQL against a prepared test database\n'
+        '  --database-url-env=<name> Connection URL variable (default SQL_CHECK_DATABASE_URL)\n'
+        '  --database-search-path=<value> Override the database role search_path\n'
         '  --verbose               Print checked and skipped query locations\n'
         '  --root=<directory>      Explicit scan root; overrides server discovery\n'
         'With no paths or root, detect a server by its serverpod dependency.\n'
         'Multiple servers or no server require --root. Dynamic SQL is skipped.\n'
         'PL/pgSQL function, procedure, and DO bodies are checked automatically.\n'
+        'Database mode selects the server grammar unless --postgres-version is explicit.\n'
         'Named parameter bindings are checked when map keys are statically readable.',
       );
       return;
@@ -83,6 +92,15 @@ void checkSql(List<String> args) {
       verbose = true;
     } else if (arg.startsWith('--postgres-version=')) {
       major = int.tryParse(arg.split('=').last) ?? -1;
+      explicitVersion = true;
+    } else if (arg == '--database-check') {
+      databaseCheck = true;
+    } else if (arg.startsWith('--database-url-env=')) {
+      databaseUrlEnv = arg.substring('--database-url-env='.length);
+      databaseOption = true;
+    } else if (arg.startsWith('--database-search-path=')) {
+      databaseSearchPath = arg.substring('--database-search-path='.length);
+      databaseOption = true;
     } else if (arg.startsWith('--root=')) {
       explicitRoot = arg.substring('--root='.length);
     } else if (arg.startsWith('-')) {
@@ -93,10 +111,19 @@ void checkSql(List<String> args) {
       paths.add(arg);
     }
   }
-  final versions = PostgresParser.supportedVersions.where(
-    (v) => v.major == major,
-  );
-  if (versions.isEmpty) {
+  if (databaseOption && !databaseCheck ||
+      !RegExp(r'^[A-Za-z_][A-Za-z_0-9]*$').hasMatch(databaseUrlEnv) ||
+      databaseSearchPath != null &&
+          (databaseSearchPath.trim().isEmpty ||
+              databaseSearchPath.contains('\u0000'))) {
+    stderr.writeln(
+      'Invalid database options. Use --database-check with a valid environment variable name and nonempty search_path.',
+    );
+    exitCode = 2;
+    return;
+  }
+  if ((!databaseCheck || explicitVersion) &&
+      !PostgresParser.supportedVersions.any((v) => v.major == major)) {
     stderr.writeln(
       'Unsupported PostgreSQL version: $major. Supported: '
       '${PostgresParser.supportedVersions.map((v) => v.major).join(', ')}',
@@ -123,221 +150,389 @@ void checkSql(List<String> args) {
   if (explicitRoot == null && paths.isEmpty) {
     stdout.writeln('Detected Serverpod server: $root');
   }
-  final parser = PostgresParser(version: versions.single);
-  final sources = DartSources();
-  final files = <String, File>{};
-  var operationalErrors = 0;
-  for (final path in paths.isEmpty ? [root] : paths) {
+  DatabaseChecker? database;
+  if (databaseCheck) {
+    final url = Platform.environment[databaseUrlEnv];
+    if (url == null || url.trim().isEmpty) {
+      stderr.writeln(
+        'ERROR: Set $databaseUrlEnv to the connection URL of a prepared, disposable test database.',
+      );
+      exitCode = 2;
+      return;
+    }
     try {
-      if (FileSystemEntity.typeSync(path) == FileSystemEntityType.notFound) {
-        throw FileSystemException('Path does not exist', path);
+      database = await DatabaseChecker.open(
+        url,
+        searchPath: databaseSearchPath,
+      );
+      stdout.writeln(
+        'Database PostgreSQL ${database.serverVersion}; role ${database.role}; search_path ${database.searchPath}.',
+      );
+      if (!PostgresParser.supportedVersions.any(
+        (v) => v.major == database!.major,
+      )) {
+        throw DatabaseCheckException(
+          'Unsupported database PostgreSQL version: ${database.major}. Available parser versions: ${PostgresParser.supportedVersions.map((v) => v.major).join(', ')}.',
+        );
       }
-      for (final file in _files(path, includeMigrations, includeTests)) {
-        files[file.absolute.path] = file;
+      if (explicitVersion && major != database.major) {
+        throw DatabaseCheckException(
+          'Parser PostgreSQL $major does not match database PostgreSQL ${database.major}.',
+        );
       }
-    } on FileSystemException catch (error) {
+      major = database.major;
+    } on DatabaseCheckException catch (error) {
       stderr.writeln('ERROR: $error');
-      operationalErrors++;
+      try {
+        await database?.close();
+      } catch (_) {
+        // Keep connection failures sanitized.
+      }
+      exitCode = 2;
+      return;
     }
   }
-  var checked = 0;
-  var failed = 0;
-  var skipped = 0;
-  var bindingsChecked = 0;
-  var bindingFailures = 0;
-  var bindingsSkipped = 0;
-  var sqlFiles = 0;
-  var dartFiles = 0;
-  var plpgsqlChecked = 0;
-  var plpgsqlFailed = 0;
-  final sortedFiles = files.values.toList()
-    ..sort((a, b) => a.path.compareTo(b.path));
-  stdout.writeln(
-    'Using local postgresql_parser with PostgreSQL $major grammar.',
+  final versions = PostgresParser.supportedVersions.where(
+    (v) => v.major == major,
   );
-  for (final file in sortedFiles) {
-    try {
-      final source = file.readAsStringSync();
-      final isSql = file.path.endsWith('.sql');
-      if (isSql) {
-        sqlFiles++;
-      } else {
-        dartFiles++;
-      }
-      final blocks = isSql
-          ? [
-              _Block(0, [
-                _SqlText.original(SourceFile(file.absolute.path, source)),
-              ]),
-            ]
-          : _dartSql(source, file.absolute.path, sources);
-      for (final block in blocks) {
-        final line =
-            '\n'.allMatches(source.substring(0, block.offset)).length + 1;
-        final label = '${_displayPath(file.absolute.path, root)}:$line';
-        if (block.variants == null) {
-          skipped++;
-          if (verbose) stdout.writeln('SKIP $label (${block.reason})');
-          continue;
+  try {
+    final parser = PostgresParser(version: versions.single);
+    final sources = DartSources();
+    final files = <String, File>{};
+    var operationalErrors = 0;
+    for (final path in paths.isEmpty ? [root] : paths) {
+      try {
+        if (FileSystemEntity.typeSync(path) == FileSystemEntityType.notFound) {
+          throw FileSystemException('Path does not exist', path);
         }
-        for (var variant = 0; variant < block.variants!.length; variant++) {
-          final text = block.variants![variant];
-          if (text.text.trim().isEmpty) continue;
-          final parameterOffsets = <String, int>{};
-          final prepared = isSql
-              ? text
-              : _normalizeParameters(text, parameterOffsets: parameterOffsets);
-          final sql = prepared.text;
-          final variantLabel = block.variants!.length == 1
-              ? label
-              : '$label (variant ${variant + 1})';
-          var missingBindings = false;
-          final bindings = block.variantBindings?[variant] ?? block.bindings;
-          if (bindings != null && parameterOffsets.isNotEmpty) {
-            final keys = bindings.keys;
-            if (keys == null) {
-              bindingsSkipped++;
-              if (verbose) {
-                stdout.writeln(
-                  'SKIP BINDINGS $variantLabel (parameter map keys are not statically readable)',
-                );
-              }
-            } else {
-              final uncertain = parameterOffsets.keys.any(
-                (name) =>
-                    !keys.contains(name) && bindings.possible!.contains(name),
-              );
-              if (uncertain) {
+        for (final file in _files(path, includeMigrations, includeTests)) {
+          files[file.absolute.path] = file;
+        }
+      } on FileSystemException catch (error) {
+        stderr.writeln('ERROR: $error');
+        operationalErrors++;
+      }
+    }
+    var checked = 0;
+    var failed = 0;
+    var skipped = 0;
+    var bindingsChecked = 0;
+    var bindingFailures = 0;
+    var bindingsSkipped = 0;
+    var sqlFiles = 0;
+    var dartFiles = 0;
+    var plpgsqlChecked = 0;
+    var plpgsqlFailed = 0;
+    var databaseChecked = 0;
+    var databaseFailed = 0;
+    var databaseUncovered = 0;
+    final databaseReasons = <String, int>{};
+    void databaseSkip(String label, String reason) {
+      databaseUncovered++;
+      databaseReasons.update(reason, (count) => count + 1, ifAbsent: () => 1);
+      if (verbose) stdout.writeln('SKIP DATABASE $label ($reason)');
+    }
+
+    final sortedFiles = files.values.toList()
+      ..sort((a, b) => a.path.compareTo(b.path));
+    stdout.writeln(
+      'Using local postgresql_parser with PostgreSQL $major grammar.',
+    );
+    for (final file in sortedFiles) {
+      try {
+        final source = file.readAsStringSync();
+        final isSql = file.path.endsWith('.sql');
+        if (isSql) {
+          sqlFiles++;
+        } else {
+          dartFiles++;
+        }
+        final blocks = isSql
+            ? [
+                _Block(0, [
+                  _SqlText.original(SourceFile(file.absolute.path, source)),
+                ]),
+              ]
+            : _dartSql(source, file.absolute.path, sources);
+        for (final block in blocks) {
+          final line =
+              '\n'.allMatches(source.substring(0, block.offset)).length + 1;
+          final label = '${_displayPath(file.absolute.path, root)}:$line';
+          if (block.variants == null) {
+            skipped++;
+            if (database != null && block.isRawQuery) {
+              databaseSkip(label, block.reason);
+            }
+            if (verbose) stdout.writeln('SKIP $label (${block.reason})');
+            continue;
+          }
+          for (var variant = 0; variant < block.variants!.length; variant++) {
+            final text = block.variants![variant];
+            if (text.text.trim().isEmpty) continue;
+            final parameterOffsets = <String, int>{};
+            final prepared = isSql
+                ? text
+                : _normalizeParameters(
+                    text,
+                    parameterOffsets: parameterOffsets,
+                  );
+            final sql = prepared.text;
+            final variantLabel = block.variants!.length == 1
+                ? label
+                : '$label (variant ${variant + 1})';
+            var missingBindings = false;
+            final bindings = block.variantBindings?[variant] ?? block.bindings;
+            if (bindings != null && parameterOffsets.isNotEmpty) {
+              final keys = bindings.keys;
+              if (keys == null) {
                 bindingsSkipped++;
                 if (verbose) {
                   stdout.writeln(
-                    'SKIP BINDINGS $variantLabel (a required key is conditional)',
+                    'SKIP BINDINGS $variantLabel (parameter map keys are not statically readable)',
                   );
                 }
               } else {
-                bindingsChecked++;
-              }
-              final available = keys.isEmpty
-                  ? '<none>'
-                  : (keys.toList()..sort()).join(', ');
-              for (final parameter in parameterOffsets.entries) {
-                if (bindings.possible!.contains(parameter.key)) continue;
-                missingBindings = true;
-                bindingFailures++;
-                _reportSqlFailure(
-                  _displayPath(file.absolute.path, root),
-                  source,
-                  block.offset,
-                  text,
-                  parameter.value,
-                  'missing named parameter binding for @${parameter.key} '
-                  '(available keys: $available)',
-                  block.variants!.length > 1 ? ' (variant ${variant + 1})' : '',
-                  root: root,
+                final uncertain = parameterOffsets.keys.any(
+                  (name) =>
+                      !keys.contains(name) && bindings.possible!.contains(name),
                 );
-              }
-            }
-          }
-          checked++;
-          try {
-            final result = parser.parse(sql);
-            var bodyFailed = false;
-            for (final definition in _plpgsqlStatements(result, prepared)) {
-              final statement = definition.sql;
-              plpgsqlChecked++;
-              try {
-                // Older upstream compilers assert when a definition has no AS
-                // body. Diagnose it before calling the native PL/pgSQL parser.
-                if (!definition.hasBody) {
-                  throw PostgresParseException(
-                    version: parser.version,
-                    message: 'definition requires an AS body',
-                    cursorPosition: 0,
+                if (uncertain) {
+                  bindingsSkipped++;
+                  if (verbose) {
+                    stdout.writeln(
+                      'SKIP BINDINGS $variantLabel (a required key is conditional)',
+                    );
+                  }
+                } else {
+                  bindingsChecked++;
+                }
+                final available = keys.isEmpty
+                    ? '<none>'
+                    : (keys.toList()..sort()).join(', ');
+                for (final parameter in parameterOffsets.entries) {
+                  if (bindings.possible!.contains(parameter.key)) continue;
+                  missingBindings = true;
+                  bindingFailures++;
+                  _reportSqlFailure(
+                    _displayPath(file.absolute.path, root),
+                    source,
+                    block.offset,
+                    text,
+                    parameter.value,
+                    'missing named parameter binding for @${parameter.key} '
+                    '(available keys: $available)',
+                    block.variants!.length > 1
+                        ? ' (variant ${variant + 1})'
+                        : '',
+                    root: root,
                   );
                 }
-                parser.parsePlpgsql(statement.text);
-              } on PostgresParseException catch (error) {
-                bodyFailed = true;
-                plpgsqlFailed++;
-                _reportSqlFailure(
-                  _displayPath(file.absolute.path, root),
-                  source,
-                  block.offset,
-                  statement,
-                  null,
-                  'PL/pgSQL: ${error.message}',
-                  block.variants!.length > 1 ? ' (variant ${variant + 1})' : '',
-                  positionDetail: error.cursorPosition > 0
-                      ? 'PL/pgSQL parser position ${error.cursorPosition}'
-                      : 'PL/pgSQL parser provided no error position',
-                  blockLocationNote: 'PL/pgSQL block starts here',
-                  blockOrigin: statement.origins?.firstOrNull,
-                  root: root,
+              }
+            }
+            checked++;
+            try {
+              final result = parser.parse(sql);
+              var bodyFailed = false;
+              for (final definition in _plpgsqlStatements(result, prepared)) {
+                final statement = definition.sql;
+                plpgsqlChecked++;
+                try {
+                  // Older upstream compilers assert when a definition has no AS
+                  // body. Diagnose it before calling the native PL/pgSQL parser.
+                  if (!definition.hasBody) {
+                    throw PostgresParseException(
+                      version: parser.version,
+                      message: 'definition requires an AS body',
+                      cursorPosition: 0,
+                    );
+                  }
+                  parser.parsePlpgsql(statement.text);
+                } on PostgresParseException catch (error) {
+                  bodyFailed = true;
+                  plpgsqlFailed++;
+                  _reportSqlFailure(
+                    _displayPath(file.absolute.path, root),
+                    source,
+                    block.offset,
+                    statement,
+                    null,
+                    'PL/pgSQL: ${error.message}',
+                    block.variants!.length > 1
+                        ? ' (variant ${variant + 1})'
+                        : '',
+                    positionDetail: error.cursorPosition > 0
+                        ? 'PL/pgSQL parser position ${error.cursorPosition}'
+                        : 'PL/pgSQL parser provided no error position',
+                    blockLocationNote: 'PL/pgSQL block starts here',
+                    blockOrigin: statement.origins?.firstOrNull,
+                    root: root,
+                  );
+                }
+              }
+              if (bodyFailed) failed++;
+              if (database != null && (isSql || block.isRawQuery)) {
+                final statements = databaseStatements(result, prepared.text);
+                if (block.isRawQuery && statements.length > 1) {
+                  databaseFailed++;
+                  _reportSqlFailure(
+                    _displayPath(file.absolute.path, root),
+                    source,
+                    block.offset,
+                    prepared,
+                    null,
+                    'DATABASE: a raw query call must contain a single SQL statement',
+                    block.variants!.length > 1
+                        ? ' (variant ${variant + 1})'
+                        : '',
+                    root: root,
+                  );
+                } else if (!isSql &&
+                    normalizeSqlParameters(text.text).mixesParameters) {
+                  databaseSkip(
+                    variantLabel,
+                    'mixed named and positional parameters',
+                  );
+                } else {
+                  for (final statement in statements) {
+                    final statementText = _SqlText(
+                      statement.sql,
+                      prepared.origins?.sublist(statement.start, statement.end),
+                      prepared.origins != null &&
+                              statement.end < prepared.text.length
+                          ? prepared.origins![statement.end]
+                          : prepared.endOrigin,
+                    );
+                    try {
+                      final outcome = await database.check(statement);
+                      switch (outcome.status) {
+                        case DatabaseCheckStatus.checked:
+                          databaseChecked++;
+                          if (verbose) {
+                            stdout.writeln('OK DATABASE $variantLabel');
+                          }
+                        case DatabaseCheckStatus.uncovered:
+                          databaseSkip(
+                            variantLabel,
+                            '${outcome.code == null ? '' : '[${outcome.code}] '}${outcome.message}',
+                          );
+                        case DatabaseCheckStatus.failed:
+                          databaseFailed++;
+                          _reportSqlFailure(
+                            _displayPath(file.absolute.path, root),
+                            source,
+                            block.offset,
+                            statementText,
+                            outcome.offset,
+                            'DATABASE${outcome.code == null ? '' : ' [${outcome.code}]'}: ${outcome.message}',
+                            block.variants!.length > 1
+                                ? ' (variant ${variant + 1})'
+                                : '',
+                            root: root,
+                            blockOrigin: statementText.origins?.firstOrNull,
+                            blockLocationNote: 'database statement starts here',
+                            positionDetail: outcome.offset == null
+                                ? 'database provided no source error position'
+                                : null,
+                          );
+                      }
+                    } on DatabaseCheckException catch (error) {
+                      stderr.writeln('ERROR: $error');
+                      operationalErrors++;
+                      databaseSkip(
+                        variantLabel,
+                        'database validation interrupted',
+                      );
+                    }
+                  }
+                }
+              }
+              if (verbose && !missingBindings && !bodyFailed) {
+                stdout.writeln(
+                  '${database == null ? 'OK' : 'OK SYNTAX'} $variantLabel',
                 );
               }
-            }
-            if (bodyFailed) failed++;
-            if (verbose && !missingBindings && !bodyFailed) {
-              stdout.writeln('OK $variantLabel');
-            }
-          } on PostgresParseException catch (error) {
-            // CTE helpers deliberately contain only a WITH clause. Complete that
-            // fragment to validate its grammar; raw calls require a full query.
-            if (!isSql &&
-                !block.isRawQuery &&
-                RegExp(r'^\s*WITH\b').hasMatch(sql) &&
-                error.message == 'syntax error at end of input') {
-              try {
-                final needsCte =
-                    RegExp(r'^\s*WITH(?:\s+RECURSIVE)?\s*$').hasMatch(sql) ||
-                    sql.trimRight().endsWith(',');
-                final completion = needsCte
-                    ? '__serverpod_sql_check_fragment__ AS (SELECT 1) SELECT 1;'
-                    : 'SELECT 1;';
-                parser.parse('$sql\n$completion');
-                if (verbose) stdout.writeln('OK $variantLabel (CTE fragment)');
-                continue;
-              } on PostgresParseException {
-                // Report the original error when it is not a valid CTE prefix.
+            } on PostgresParseException catch (error) {
+              if (database != null && (isSql || block.isRawQuery)) {
+                databaseSkip(variantLabel, 'SQL syntax check failed');
               }
+              // CTE helpers deliberately contain only a WITH clause. Complete that
+              // fragment to validate its grammar; raw calls require a full query.
+              if (!isSql &&
+                  !block.isRawQuery &&
+                  RegExp(r'^\s*WITH\b').hasMatch(sql) &&
+                  error.message == 'syntax error at end of input') {
+                try {
+                  final needsCte =
+                      RegExp(r'^\s*WITH(?:\s+RECURSIVE)?\s*$').hasMatch(sql) ||
+                      sql.trimRight().endsWith(',');
+                  final completion = needsCte
+                      ? '__serverpod_sql_check_fragment__ AS (SELECT 1) SELECT 1;'
+                      : 'SELECT 1;';
+                  parser.parse('$sql\n$completion');
+                  if (verbose) {
+                    stdout.writeln('OK $variantLabel (CTE fragment)');
+                  }
+                  continue;
+                } on PostgresParseException {
+                  // Report the original error when it is not a valid CTE prefix.
+                }
+              }
+              failed++;
+              _reportFailure(
+                _displayPath(file.absolute.path, root),
+                source,
+                block.offset,
+                prepared,
+                error,
+                block.variants!.length > 1 ? ' (variant ${variant + 1})' : '',
+                root: root,
+              );
             }
-            failed++;
-            _reportFailure(
-              _displayPath(file.absolute.path, root),
-              source,
-              block.offset,
-              prepared,
-              error,
-              block.variants!.length > 1 ? ' (variant ${variant + 1})' : '',
-              root: root,
-            );
           }
         }
+      } on FileSystemException catch (error) {
+        stderr.writeln('ERROR: $error');
+        operationalErrors++;
+      } on FormatException catch (error) {
+        stderr.writeln('ERROR: $error');
+        operationalErrors++;
       }
-    } on FileSystemException catch (error) {
-      stderr.writeln('ERROR: $error');
-      operationalErrors++;
-    } on FormatException catch (error) {
-      stderr.writeln('ERROR: $error');
-      operationalErrors++;
     }
-  }
-  stdout.writeln(
-    'Scanned $sqlFiles SQL files and $dartFiles Dart files.\n'
-    'Checked $checked SQL variants; $failed failed; $skipped dynamic queries/templates skipped.\n'
-    'Checked $plpgsqlChecked PL/pgSQL definitions; $plpgsqlFailed failed.\n'
-    'Checked $bindingsChecked named parameter sets; $bindingFailures missing bindings; '
-    '$bindingsSkipped binding checks skipped.',
-  );
-  if ((skipped > 0 || bindingsSkipped > 0) && !verbose) {
     stdout.writeln(
-      'Use --verbose to see skipped SQL and binding checks. Runtime-built SQL or parameter maps need a runtime check.',
+      'Scanned $sqlFiles SQL files and $dartFiles Dart files.\n'
+      'Checked $checked SQL variants; $failed failed; $skipped dynamic queries/templates skipped.\n'
+      'Checked $plpgsqlChecked PL/pgSQL definitions; $plpgsqlFailed failed.\n'
+      'Checked $bindingsChecked named parameter sets; $bindingFailures missing bindings; '
+      '$bindingsSkipped binding checks skipped.',
     );
-  }
-  if (operationalErrors > 0) {
-    exitCode = 2;
-  } else if (failed > 0 || bindingFailures > 0) {
-    exitCode = 1;
+    if (database != null) {
+      stdout.writeln(
+        'Checked $databaseChecked database statements; $databaseFailed failed; $databaseUncovered not covered.\n'
+        'Database validation: ${database.elapsed.inMilliseconds} ms; ${database.preparations} unique preparations${database.stopped ? '; incomplete' : ''}.',
+      );
+      for (final reason in databaseReasons.keys.toList()..sort()) {
+        stdout.writeln(
+          'Database not covered: ${databaseReasons[reason]} ($reason)',
+        );
+      }
+    }
+    if ((skipped > 0 || bindingsSkipped > 0) && !verbose) {
+      stdout.writeln(
+        'Use --verbose to see skipped SQL and binding checks. Runtime-built SQL or parameter maps need a runtime check.',
+      );
+    }
+    if (operationalErrors > 0) {
+      exitCode = 2;
+    } else if (failed > 0 || bindingFailures > 0 || databaseFailed > 0) {
+      exitCode = 1;
+    }
+  } finally {
+    try {
+      await database?.close();
+    } catch (_) {
+      stderr.writeln('ERROR: Could not close the database connection.');
+      exitCode = 2;
+    }
   }
 }
 
@@ -1493,71 +1688,13 @@ _SqlText _normalizeParameters(
   _SqlText input, {
   Map<String, int>? parameterOffsets,
 }) {
-  final sql = input.text;
-  final output = StringBuffer();
-  final origins = <_Origin>[];
-  final indexes = <String, int>{};
-  var i = 0;
-  while (i < sql.length) {
-    var end = i + 1;
-    if (sql.startsWith('--', i)) {
-      end = sql.indexOf('\n', i + 2);
-      if (end < 0) end = sql.length;
-    } else if (sql.startsWith('/*', i)) {
-      var depth = 1;
-      end = i + 2;
-      while (end < sql.length && depth > 0) {
-        if (sql.startsWith('/*', end)) {
-          depth++;
-          end += 2;
-        } else if (sql.startsWith('*/', end)) {
-          depth--;
-          end += 2;
-        } else {
-          end++;
-        }
-      }
-    } else if (sql[i] == "'" || sql[i] == '"') {
-      final quote = sql[i];
-      while (end < sql.length) {
-        if (sql[end] == '\\') {
-          end = (end + 2).clamp(0, sql.length);
-        } else if (sql[end] == quote) {
-          end++;
-          if (end >= sql.length || sql[end] != quote) break;
-          end++;
-        } else {
-          end++;
-        }
-      }
-    } else {
-      final dollar = _dollarQuote.matchAsPrefix(sql, i);
-      if (dollar != null) {
-        final close = sql.indexOf(dollar.group(0)!, dollar.end);
-        end = close < 0 ? sql.length : close + dollar.group(0)!.length;
-      } else {
-        final parameter = _parameter.matchAsPrefix(sql, i);
-        if (parameter != null) {
-          final name = parameter.group(0)!;
-          parameterOffsets?.putIfAbsent(name.substring(1), () => i);
-          final index = indexes.putIfAbsent(name, () => indexes.length + 1);
-          final placeholder = '\$$index';
-          output.write(placeholder);
-          if (input.origins != null) {
-            origins.addAll(List.filled(placeholder.length, input.origins![i]));
-          }
-          i = parameter.end;
-          continue;
-        }
-      }
-    }
-    output.write(sql.substring(i, end));
-    if (input.origins != null) origins.addAll(input.origins!.sublist(i, end));
-    i = end;
-  }
+  final normalized = normalizeSqlParameters(input.text);
+  parameterOffsets?.addAll(normalized.namedOffsets);
   return _SqlText(
-    output.toString(),
-    input.origins == null ? null : origins,
+    normalized.sql,
+    input.origins == null
+        ? null
+        : normalized.offsets.map((offset) => input.origins![offset]).toList(),
     input.endOrigin,
   );
 }

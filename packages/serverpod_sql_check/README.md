@@ -1,8 +1,9 @@
 # serverpod_sql_check
 
 Static SQL, PL/pgSQL, and named parameter binding checks for Dart and Serverpod
-projects, using the sibling `postgresql_parser` package. SQL is parsed without
-being executed or connecting to a database.
+projects, using the sibling `postgresql_parser` package. By default, SQL is
+parsed without being executed or connecting to a database. An optional mode
+also analyzes supported queries against a prepared test database schema.
 
 ## Run
 
@@ -64,6 +65,78 @@ by default. Use `--include-tests` to check SQL in test folders, including test
 setup and cleanup queries. Intentionally invalid SQL in tests is reported as a
 failure. This option is also required when passing a test file or directory
 explicitly; `--include-migrations` independently enables migration SQL.
+
+## Optional database validation
+
+Syntax checking accepts `SELECT label FROM productz;` even if `productz` does
+not exist. Database mode asks PostgreSQL to analyze supported statements against
+the installed schema and catches missing tables, renamed columns, unknown
+functions, and incompatible types.
+
+Prepare a **disposable test database** separately:
+
+1. Start PostgreSQL 17 or 18 with the extensions your project uses.
+2. Apply Serverpod migrations and custom schema setup in the project's required
+   order. The checker does not run migrations or read Serverpod connection files.
+3. Set `SQL_CHECK_DATABASE_URL` to its PostgreSQL connection URL, using the role
+   whose schema visibility you want to check. Configure SSL in the connection URL.
+
+```sh
+serverpod_sql_check --database-check
+serverpod_sql_check --database-check --database-url-env=MY_TEST_DATABASE_URL
+serverpod_sql_check --database-check --database-search-path=app,public
+```
+
+The default URL variable is `SQL_CHECK_DATABASE_URL`. Its value and password
+are never printed, and connection failures omit credentials. The effective
+database role is reported as session metadata. Database configuration options require
+`--database-check`. Use the connection role's `search_path` by default, or supply
+an explicit override; the override is passed as a parameter, not interpolated SQL.
+The output shows the server version, parser grammar, effective role and search
+path. Without an explicit `--postgres-version`, database mode selects the matching
+17/18 grammar. An unsupported server major or an explicit version mismatch fails
+with exit code 2. Offline checking still defaults to PostgreSQL 17.
+
+Schema checks cover statically resolved `unsafeQuery` and `unsafeExecute` calls
+and complete statements in `.sql` files. The checker uses the native parse tree
+to isolate statements and permits only `SELECT`, `VALUES`, `INSERT`, `UPDATE`,
+`DELETE`, and `MERGE` without `SELECT INTO`. It sends `PREPARE`, then `DEALLOCATE`,
+using the extended protocol to reject multiple top-level commands. It never sends
+the scanned queries for execution, `EXECUTE`, or `EXPLAIN ANALYZE`. The session is
+read-only, with a 10-second connection limit and a 5-second command limit.
+Use a test database; no production connection is discovered automatically.
+
+Repeated named parameters such as `@id` become the same positional parameter.
+Existing `$1` parameters are preserved. PostgreSQL infers parameter types where
+possible; indeterminate types and mixed named/positional conventions are reported
+as **not covered**, without fabricated values. Raw query calls with several
+statements fail; `.sql` scripts are checked statement by statement.
+
+Constants and fragments not used in raw calls remain syntax-only. DDL, `DO`,
+`CALL`, `COPY`, and PL/pgSQL definitions are not validated against the schema or
+executed. Dynamic SQL that cannot be extracted remains unchecked. Including
+migration files checks supported queries against the already prepared schema,
+not against each intermediate migration state.
+
+The existing syntax, PL/pgSQL, and binding summaries remain separate from the
+database summary. `--verbose` distinguishes `OK SYNTAX`, `OK DATABASE`, and
+`SKIP DATABASE`; schema errors include PostgreSQL's SQLSTATE and original source
+location. Identical statements share a preparation, but retain diagnostics at
+each occurrence. The report shows database time and the number of unique
+preparations; a timeout or lost connection makes validation incomplete.
+
+Passing schema validation does not guarantee results, constraints depending on
+data, all execution permissions, or PL/pgSQL branches. Integration tests remain
+necessary for runtime behavior.
+
+A small local macOS fixture with 200 raw calls and 20 distinct queries took
+approximately 42 ms offline and 95 ms connected to PostgreSQL 17 in Docker
+(median of three runs after warmup). Coverage was identical, and only 20
+preparations were needed. This excludes database startup and schema setup; the
+added cost depends on query count and database latency.
+
+For programmatic CLI use, `checkSql(arguments)` now returns `Future<void>`;
+await it before reading `exitCode` or terminating the process.
 
 ## What is checked
 
@@ -312,8 +385,10 @@ the PL/pgSQL failure summary.
 Exit codes:
 
 - `0`: completed checks passed; some checks may have been skipped.
-- `1`: SQL syntax errors, PL/pgSQL body errors, or missing named bindings.
-- `2`: invalid options, missing or ambiguous server discovery, or file access errors.
+- `1`: SQL syntax errors, PL/pgSQL body errors, missing named bindings, or
+  database statement errors.
+- `2`: invalid options, missing or ambiguous server discovery, file access
+  errors, database configuration/version errors, or interrupted database checks.
 
 ## Tests
 
@@ -335,3 +410,18 @@ conservative handling of unknown or ambiguous source.
 They also cover records and constructor fields, collection and buffer assembly,
 finite loops, helper assignments and switches, correlated bindings, aliases,
 side effects, and original fragment locations on both PostgreSQL versions.
+
+Database integration tests require `SQL_CHECK_TEST_DATABASE_URL` pointing to a
+disposable PostgreSQL 17/18 database. The fixture connection needs privileges to
+create and remove a dedicated schema and login role; the CLI uses that separate
+role and a read-only session. Without the variable, these integration tests are
+skipped and the ordinary suite needs no database.
+
+```sh
+dart test test/database_check_test.dart test/database_integration_test.dart \
+  --concurrency=1 --timeout=3m
+```
+
+CI runs these tests on PostgreSQL 17 and 18, including schema failures, source
+mapping, parameter handling, cleanup, timeouts, and unchanged data after checking
+write statements.
