@@ -89,7 +89,7 @@ void example(dynamic session) {
   var query = 'select 1;';
   session.db.unsafeQuery(query);
 }
-''', 'SKIP'),
+''', 'OK'),
   'loop_variable_shadows_global': _Fixture(r'''
 const query = 'select from;';
 void example(dynamic session, List<String> queries) {
@@ -148,7 +148,7 @@ class Queries { static const query = 'select from;'; }
 void example(dynamic session) { session.db.unsafeQuery(Queries.query); }
 ''', 'FAIL'),
   'explicit_instance_field': _Fixture(r'''
-class Queries {
+final class Queries {
   final query = 'select from;';
   void example(dynamic session) { session.db.unsafeQuery(this.query); }
 }

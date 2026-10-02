@@ -166,7 +166,7 @@ void example(dynamic session) {
   final parameters = {'tenant_id': 1};
   session.db.unsafeQuery('select @tenant_id;', parameters: QueryParameters.named(parameters));
 }
-''', skipped: true),
+'''),
   'positional_parameters': _Fixture(r'''
 void example(dynamic session) {
   session.db.unsafeQuery('select @tenant_id;', parameters: QueryParameters.positional([1]));
@@ -177,7 +177,7 @@ void example(dynamic session) {
   final parameters = QueryParameters.named({'tenant_id': 1});
   session.db.unsafeQuery('select @tenant_id;', parameters: parameters);
 }
-''', skipped: true),
+'''),
   'prefixed_constructor': _Fixture(
     r'''
 void example(dynamic session) {

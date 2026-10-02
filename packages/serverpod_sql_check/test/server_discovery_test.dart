@@ -4,6 +4,15 @@ import 'package:path/path.dart' as p;
 import 'package:serverpod_sql_check/src/server_discovery.dart';
 import 'package:test/test.dart';
 
+import 'imports_and_helpers.dart';
+import 'finite_flow.dart';
+import 'static_assembly.dart';
+import 'static_contexts.dart';
+import 'static_demand.dart';
+import 'static_getters.dart';
+import 'static_strings.dart';
+import 'static_object_safety.dart';
+
 void main() {
   late Directory fixture;
 
@@ -277,6 +286,15 @@ void main() {
 
     Future<ProcessResult> run(Directory cwd, [List<String> args = const []]) =>
         Process.run(executable, args, workingDirectory: cwd.path);
+
+    importedSqlAndHelperTests(() => fixture, run);
+    finiteFlowTests(() => fixture, run);
+    staticAssemblyTests(() => fixture, run);
+    staticContextTests(() => fixture, run);
+    staticDemandTests(() => fixture, run);
+    staticGetterTests(() => fixture, run);
+    staticStringTests(() => fixture, run);
+    staticObjectSafetyTests(() => fixture, run);
 
     test('detects from client and scans only the entire server', () async {
       final server = package('backend');
