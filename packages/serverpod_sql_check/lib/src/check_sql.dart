@@ -55,6 +55,7 @@ const _rawMethods = {'unsafeQuery', 'unsafeExecute'};
 /// Checks SQL, PL/pgSQL, and bindings, and sets [exitCode] on failure.
 void checkSql(List<String> args) {
   var includeMigrations = false;
+  var includeTests = false;
   var verbose = false;
   var major = 17;
   String? explicitRoot;
@@ -64,6 +65,7 @@ void checkSql(List<String> args) {
       stdout.writeln(
         'Usage: dart run serverpod_sql_check [options] [file or directory ...]\n'
         '  --include-migrations    Include migration SQL (excluded by default)\n'
+        '  --include-tests         Include test/ and integration_test/ (excluded by default)\n'
         '  --postgres-version=17   PostgreSQL grammar: 17 (default) or 18\n'
         '  --verbose               Print checked and skipped query locations\n'
         '  --root=<directory>      Explicit scan root; overrides server discovery\n'
@@ -75,6 +77,8 @@ void checkSql(List<String> args) {
       return;
     } else if (arg == '--include-migrations') {
       includeMigrations = true;
+    } else if (arg == '--include-tests') {
+      includeTests = true;
     } else if (arg == '--verbose') {
       verbose = true;
     } else if (arg.startsWith('--postgres-version=')) {
@@ -128,7 +132,7 @@ void checkSql(List<String> args) {
       if (FileSystemEntity.typeSync(path) == FileSystemEntityType.notFound) {
         throw FileSystemException('Path does not exist', path);
       }
-      for (final file in _files(path, includeMigrations)) {
+      for (final file in _files(path, includeMigrations, includeTests)) {
         files[file.absolute.path] = file;
       }
     } on FileSystemException catch (error) {
@@ -396,11 +400,19 @@ String _displayPath(String path, String root) {
   return path.startsWith(prefix) ? path.substring(prefix.length) : path;
 }
 
-Iterable<File> _files(String path, bool includeMigrations) sync* {
+Iterable<File> _files(
+  String path,
+  bool includeMigrations,
+  bool includeTests,
+) sync* {
   final entityType = FileSystemEntity.typeSync(path, followLinks: false);
   final parts = File(path).absolute.uri.pathSegments;
   if (!includeMigrations &&
       parts.any((p) => p == 'migrations' || p == 'migration')) {
+    return;
+  }
+  if (!includeTests &&
+      parts.any((p) => p == 'test' || p == 'integration_test')) {
     return;
   }
   if (entityType == FileSystemEntityType.directory) {
@@ -418,7 +430,7 @@ Iterable<File> _files(String path, bool includeMigrations) sync* {
       return;
     }
     for (final child in Directory(path).listSync(followLinks: false)) {
-      yield* _files(child.path, includeMigrations);
+      yield* _files(child.path, includeMigrations, includeTests);
     }
   } else if (entityType == FileSystemEntityType.file) {
     final isSql = path.endsWith('.sql');

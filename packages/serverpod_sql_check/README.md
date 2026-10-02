@@ -20,6 +20,7 @@ the default grammar; PostgreSQL 18 is also supported.
 ```sh
 dart run serverpod_sql_check --root=/path/to/server --verbose
 dart run serverpod_sql_check --root=/path/to/server --include-migrations
+dart run serverpod_sql_check --root=/path/to/server --include-tests
 dart run serverpod_sql_check --root=/path/to/server --postgres-version=18
 dart run serverpod_sql_check /path/to/query.sql /path/to/service.dart
 dart run serverpod_sql_check --help
@@ -57,8 +58,12 @@ Explicit file or directory arguments also bypass discovery and are relative to
 the current directory. With both positional paths and `--root`, only the
 positional paths are scanned; `--root` controls relative diagnostic paths.
 Explicit roots can also scan SQL in directories without a Serverpod dependency.
-Migration folders, generated Dart files, build outputs, and the checker package
-itself are excluded from scanning by default.
+Test folders (`test/` and `integration_test/`), migration folders, generated Dart
+files, build outputs, and the checker package itself are excluded from scanning
+by default. Use `--include-tests` to check SQL in test folders, including test
+setup and cleanup queries. Intentionally invalid SQL in tests is reported as a
+failure. This option is also required when passing a test file or directory
+explicitly; `--include-migrations` independently enables migration SQL.
 
 ## What is checked
 

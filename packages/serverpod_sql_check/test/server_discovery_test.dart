@@ -296,6 +296,107 @@ void main() {
     staticStringTests(() => fixture, run);
     staticObjectSafetyTests(() => fixture, run);
 
+    for (final testFolder in ['test', 'integration_test']) {
+      test('excludes $testFolder SQL and Dart during discovery', () async {
+        final server = package('backend');
+        File(p.join(directory('backend/lib').path, 'query.dart'))
+            .writeAsStringSync("const sql = 'SELECT 1;';");
+        final tests = directory('backend/$testFolder/nested');
+        File(p.join(tests.path, 'invalid.sql'))
+            .writeAsStringSync('SELECT FROM;');
+        File(p.join(tests.path, 'invalid_test.dart'))
+            .writeAsStringSync("const sql = 'SELECT FROM;';");
+
+        final result = await run(server);
+        expect(
+          result.exitCode,
+          0,
+          reason: '${result.stdout}\n${result.stderr}',
+        );
+        expect(
+          result.stdout,
+          contains('Scanned 0 SQL files and 1 Dart files.'),
+        );
+        expect(result.stdout, contains('Checked 1 SQL variants; 0 failed;'));
+      });
+
+      test('--include-tests checks $testFolder SQL and Dart', () async {
+        final server = package('backend');
+        final tests = directory('backend/$testFolder/nested');
+        File(p.join(tests.path, 'invalid.sql'))
+            .writeAsStringSync('SELECT FROM;');
+        File(p.join(tests.path, 'invalid_test.dart'))
+            .writeAsStringSync("const sql = 'SELECT FROM;';");
+
+        final result = await run(fixture, [
+          '--root=${server.path}',
+          '--include-tests',
+        ]);
+        expect(result.exitCode, 1);
+        expect(
+          result.stdout,
+          contains('Scanned 1 SQL files and 1 Dart files.'),
+        );
+        expect(result.stdout, contains('Checked 2 SQL variants; 2 failed;'));
+        expect(result.stderr, contains('$testFolder/nested/invalid.sql'));
+        expect(result.stderr, contains('$testFolder/nested/invalid_test.dart'));
+      });
+
+      test(
+        'explicit $testFolder paths still require --include-tests',
+        () async {
+          final server = package('backend');
+          final tests = directory('backend/$testFolder');
+          File(p.join(tests.path, 'invalid.sql'))
+              .writeAsStringSync('SELECT FROM;');
+          for (final path in [testFolder, '$testFolder/invalid.sql']) {
+            final excluded = await run(server, [path]);
+            expect(excluded.exitCode, 0);
+            expect(
+              excluded.stdout,
+              contains('Scanned 0 SQL files and 0 Dart files.'),
+            );
+            final included = await run(server, ['--include-tests', path]);
+            expect(included.exitCode, 1);
+            expect(included.stdout, contains('Scanned 1 SQL files'));
+          }
+        },
+      );
+    }
+
+    test('test and migration inclusion flags work independently', () async {
+      final server = package('backend');
+      File(p.join(directory('backend/test/migrations').path, 'query.sql'))
+          .writeAsStringSync('SELECT FROM;');
+      for (final args in [
+        <String>[],
+        ['--include-tests'],
+        ['--include-migrations'],
+      ]) {
+        final result = await run(server, args);
+        expect(result.exitCode, 0);
+        expect(result.stdout, contains('Scanned 0 SQL files'));
+      }
+      final result = await run(server, [
+        '--include-tests',
+        '--include-migrations',
+      ]);
+      expect(result.exitCode, 1);
+      expect(result.stdout, contains('Scanned 1 SQL files'));
+    });
+
+    test('excluding tests preserves production SQL failures', () async {
+      final server = package('backend');
+      File(p.join(directory('backend/lib').path, 'invalid.sql'))
+          .writeAsStringSync('SELECT FROM;');
+      File(p.join(directory('backend/test').path, 'valid.sql'))
+          .writeAsStringSync('SELECT 1;');
+      final result = await run(server);
+      expect(result.exitCode, 1);
+      expect(result.stdout, contains('Scanned 1 SQL files'));
+      expect(result.stderr, contains('FAIL lib/invalid.sql'));
+    });
+
     test('detects from client and scans only the entire server', () async {
       final server = package('backend');
       final client = package('client', 'serverpod_client: any');
@@ -368,6 +469,7 @@ void main() {
         final help = await run(fixture, ['--help']);
         expect(help.exitCode, 0);
         expect(help.stdout, contains('overrides server discovery'));
+        expect(help.stdout, contains('--include-tests'));
       },
     );
   });
