@@ -2,7 +2,7 @@
 
 PostgreSQL SQL and PL/pgSQL parsing for Dart, backed by pinned
 [libpg_query](https://github.com/pganalyze/libpg_query) sources.
-Supports PostgreSQL 17 and 18 on macOS and Linux.
+Supports PostgreSQL 16, 17 and 18 on macOS and Linux.
 
 See the [package README](packages/postgresql_parser/README.md) for installation,
 usage, supported platforms, and API limitations.
@@ -37,8 +37,10 @@ that cannot be read statically are reported as skipped.
 Inside a Serverpod project, the checker detects the server from its
 `pubspec.yaml` dependency on `serverpod`; `--root` overrides discovery.
 
-To also analyze custom queries against a prepared PostgreSQL 17/18 test schema,
-set `SQL_CHECK_DATABASE_URL` to a disposable database and add `--database-check`.
-The checker prepares supported queries without executing them; your project or
-CI applies migrations and custom schema setup separately. See the CLI package
-README for configuration, coverage, and limitations.
+Add `--database-check` to analyze custom queries against an isolated PostgreSQL
+16/17/18 instance, prepared with Serverpod migrations and an optional schema hook.
+The checker supports Docker and Serverpod 4 embedded PostgreSQL. Alternatively,
+use `--database-target=existing` or supply `SQL_CHECK_DATABASE_URL` to connect to
+an existing prepared database. Queries are analyzed with `PREPARE` without
+executing their operations. See the CLI package README for configuration,
+coverage, and limitations.

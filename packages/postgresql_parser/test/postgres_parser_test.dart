@@ -70,6 +70,20 @@ void main() {
     );
   });
 
+  test('PostgreSQL 16 rejects MERGE NOT MATCHED BY SOURCE added in 17', () {
+    const sql =
+        'MERGE INTO target t USING source s ON t.id = s.id '
+        'WHEN NOT MATCHED BY SOURCE THEN DELETE';
+    expect(
+      () => PostgresParser(version: PostgresVersion.v16).parse(sql),
+      throwsA(isA<PostgresParseException>()),
+    );
+    expect(
+      PostgresParser(version: PostgresVersion.v17).parse(sql).tree['stmts'],
+      hasLength(1),
+    );
+  });
+
   test('PostgreSQL 18 accepts RETURNING WITH syntax', () {
     final parser = PostgresParser(version: PostgresVersion.v18);
     final result = parser.parse(

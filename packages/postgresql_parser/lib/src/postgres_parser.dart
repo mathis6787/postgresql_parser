@@ -4,6 +4,7 @@ import 'backends/backend.dart';
 import 'backends/pg17.dart';
 // BEGIN GENERATED BACKEND IMPORTS
 import 'backends/pg18.dart';
+import 'backends/pg16.dart';
 // END GENERATED BACKEND IMPORTS
 import 'parse_result.dart';
 import 'plpgsql_parse_result.dart';
@@ -26,6 +27,7 @@ final class PostgresParser {
     PostgresVersion.v17,
     // BEGIN GENERATED SUPPORTED VERSIONS
     PostgresVersion.v18,
+    PostgresVersion.v16,
     // END GENERATED SUPPORTED VERSIONS
   ];
 
@@ -33,6 +35,7 @@ final class PostgresParser {
     17: Pg17Backend(),
     // BEGIN GENERATED BACKEND REGISTRY
     18: Pg18Backend(),
+    16: Pg16Backend(),
     // END GENERATED BACKEND REGISTRY
   };
 

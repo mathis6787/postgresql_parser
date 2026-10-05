@@ -1,0 +1,8 @@
+{
+  global:
+    pgp16_parse;
+    pgp16_parse_plpgsql;
+    pgp16_free_response;
+  local:
+    *;
+};

@@ -17,7 +17,7 @@ On macOS, install the Xcode command line tools. On Debian/Ubuntu, install
 `clang`. Application builds use the committed bindings; libclang and `ffigen`
 are only needed when regenerating those bindings.
 
-The supported PostgreSQL grammars are **17 and 18**. Windows, Android, iOS,
+The supported PostgreSQL grammars are **16, 17 and 18**. Windows, Android, iOS,
 and web are currently unsupported.
 
 ## Installation

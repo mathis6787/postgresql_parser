@@ -11,6 +11,9 @@ final class PostgresVersion {
   // BEGIN GENERATED VERSION CONSTANTS
   /// PostgreSQL 18 grammar.
   static const v18 = PostgresVersion._(18);
+
+  /// PostgreSQL 16 grammar.
+  static const v16 = PostgresVersion._(16);
   // END GENERATED VERSION CONSTANTS
 
   /// The PostgreSQL major version number.

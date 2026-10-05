@@ -14,7 +14,7 @@ void main() {
     test(
       'database integration requires SQL_CHECK_TEST_DATABASE_URL',
       () {},
-      skip: 'Provide a disposable PostgreSQL 17/18 test database.',
+      skip: 'Provide a disposable PostgreSQL 16/17/18 test database.',
     );
     return;
   }
@@ -39,7 +39,7 @@ void main() {
                 .single[0]
             as int) ~/
         10000;
-    expect([17, 18], contains(major));
+    expect([16, 17, 18], contains(major));
     await execute('CREATE SCHEMA $schema');
     await execute("CREATE ROLE $role LOGIN PASSWORD '$password'");
     await execute(
@@ -278,6 +278,59 @@ void call(dynamic session, String sql) {
         result.stdout,
         contains('Checked 0 database statements; 1 failed; 1 not covered.'),
       );
+      expect(result.stderr, contains('must contain a single SQL statement'));
+      expect(result.stdout, contains('0 unique preparations'));
+    },
+  );
+
+  test(
+    'unparameterized execute batches are analyzed without executing effects',
+    () async {
+      // The same driver path used by Serverpod really accepts a batch when
+      // ignoring rows without binding parameters.
+      await admin.execute(
+        'CREATE TEMP TABLE batch_probe(id int); DROP TABLE batch_probe;',
+        ignoreRows: true,
+      );
+      final result = await run(r"""
+void call(dynamic session) {
+  session.db.unsafeExecute(r'''
+    CREATE TABLE must_not_be_created(id int);
+    DO $body$ BEGIN RAISE EXCEPTION 'must not execute'; END; $body$;
+    INSERT INTO products VALUES (99, 'must not insert', 1);
+    UPDATE products SET label = 'must not update';
+    SELECT label FROM products;
+  ''');
+}
+""", file: 'endpoint.dart');
+      succeeds(result);
+      expect(
+        result.stdout,
+        contains('Checked 3 database statements; 0 failed; 2 not covered.'),
+      );
+      expect(
+        (await execute('SELECT label FROM $schema.products')).single.single,
+        'original',
+      );
+      expect(
+        (await execute("SELECT to_regclass('$schema.must_not_be_created')"))
+            .single
+            .single,
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'parameterized execute batches still reject multiple statements',
+    () async {
+      final result = await run('''
+void call(dynamic session) {
+  session.db.unsafeExecute('SELECT @id::int; SELECT 2;',
+    parameters: QueryParameters.named({'id': 1}));
+}
+''', file: 'endpoint.dart');
+      expect(result.exitCode, 1);
       expect(result.stderr, contains('must contain a single SQL statement'));
       expect(result.stdout, contains('0 unique preparations'));
     },

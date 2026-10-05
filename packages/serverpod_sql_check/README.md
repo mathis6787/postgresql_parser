@@ -73,29 +73,124 @@ not exist. Database mode asks PostgreSQL to analyze supported statements against
 the installed schema and catches missing tables, renamed columns, unknown
 functions, and incompatible types.
 
-Prepare a **disposable test database** separately:
-
-1. Start PostgreSQL 17 or 18 with the extensions your project uses.
-2. Apply Serverpod migrations and custom schema setup in the project's required
-   order. The checker does not run migrations or read Serverpod connection files.
-3. Set `SQL_CHECK_DATABASE_URL` to its PostgreSQL connection URL, using the role
-   whose schema visibility you want to check. Configure SSL in the connection URL.
+Without a connection URL, `--database-check` creates an **isolated temporary
+PostgreSQL instance**, prepares the project's schema, validates queries and
+removes its instance. PostgreSQL 16/17/18 are supported; offline checking still
+defaults to PostgreSQL 17.
 
 ```sh
 serverpod_sql_check --database-check
-serverpod_sql_check --database-check --database-url-env=MY_TEST_DATABASE_URL
-serverpod_sql_check --database-check --database-search-path=app,public
+serverpod_sql_check --database-check --database-backend=embedded
+serverpod_sql_check --database-check --database-backend=docker
+serverpod_sql_check --database-check --database-docker-image=postgres:17
+serverpod_sql_check --database-check --database-setup=tool/sql_check_database.dart
 ```
 
-The default URL variable is `SQL_CHECK_DATABASE_URL`. Its value and password
-are never printed, and connection failures omit credentials. The effective
-database role is reported as session metadata. Database configuration options require
-`--database-check`. Use the connection role's `search_path` by default, or supply
-an explicit override; the override is passed as a parameter, not interpolated SQL.
-The output shows the server version, parser grammar, effective role and search
-path. Without an explicit `--postgres-version`, database mode selects the matching
-17/18 grammar. An unsupported server major or an explicit version mismatch fails
-with exit code 2. Offline checking still defaults to PostgreSQL 17.
+The server package follows the usual discovery and `--root` rules. Temporary
+setup defaults to `config/test.yaml`; `--database-mode=development` selects the
+other local configuration. There is no fallback to a different mode.
+`SERVERPOD_DATABASE_*` values override YAML. Passwords follow shared, mode,
+`SERVERPOD_DATABASE_PASSWORD`, then `SERVERPOD_PASSWORD_database` precedence.
+
+| Option | Behavior |
+| --- | --- |
+| `--database-target=temporary` | Isolated instance; conflicts with a populated URL variable |
+| `--database-target=existing` | Prepared project database; defaults to development |
+| `--database-backend=auto` | Temporary backend: embedded with `dataPath`, otherwise Docker |
+| `--database-backend=embedded` or `docker` | Explicit temporary backend |
+| `--database-mode=test` or `development` | Project configuration mode |
+| `--database-docker-image=<image>` | Temporary Docker image override |
+| `--database-setup=<file.dart>` | Temporary preparation before and after migrations |
+| `--database-url-env=<name>` | Existing prepared database URL variable |
+| `--database-search-path=<value>` | Explicit search path override |
+
+Embedded setup uses the project's resolved Serverpod 4 dependencies and their
+published PostgreSQL bundle (currently 16.13). The first launch may download
+binaries into Serverpod's shared cache. Each invocation gets a separate data
+directory; the project's normal `dataPath` is never initialized or modified.
+
+Docker setup identifies the Compose service by its configured database name or
+published port and reuses only its image. Ambiguous services or build-only
+configurations require `--database-docker-image`. Its dedicated container has
+random credentials, a random localhost port and no project volume or custom
+service command. Docker must already be available; the checker does not start
+Docker Desktop or other Compose services.
+
+For a Compose service using only `build:`, provide the name of its built image,
+for example `--database-docker-image=my_server-postgres_test`. Build that image
+with Docker or Compose first. The checker uses an image already present locally;
+it pulls the image only when missing. This preserves extensions installed by a
+custom Dockerfile. The checker does not build project Dockerfiles automatically.
+Installing extension binaries in the image does not enable those extensions in
+the fresh database. Use the setup hook for `CREATE EXTENSION`, custom generated
+columns, indexes and other objects created by application startup. Missing
+objects cause schema errors even when the same SQL works in a prepared database.
+
+Automatic migrations support Serverpod 3.4 and 4.x. Run `dart pub get` and
+`serverpod generate`, and create the project's migrations beforehand. Helpers
+use the project's resolved dependencies and generated Protocol/Endpoints, in
+maintenance mode against the temporary database. They do not import application
+startup, start API servers or Redis, execute future calls, or apply repairs.
+Initialization follows Serverpod's migration mechanism; objects added only in
+historical `migration.sql` files may need the hook on a freshly initialized base.
+
+The optional Dart setup script runs from the server directory twice, with
+`--phase=before-migrations` and `--phase=after-migrations`. It receives the
+**temporary** connection through `SQL_CHECK_DATABASE_URL`. Use the first phase
+for extensions or schemas required by migrations and the second for custom
+objects:
+
+```dart
+import 'dart:io';
+import 'package:postgres/postgres.dart';
+
+Future<void> main(List<String> args) async {
+  final db = await Connection.openFromUrl(
+    Platform.environment['SQL_CHECK_DATABASE_URL']!,
+  );
+  try {
+    if (args.single == '--phase=before-migrations') {
+      await db.execute('CREATE SCHEMA custom');
+    } else {
+      await db.execute('CREATE TABLE custom.audit (id bigint PRIMARY KEY)');
+    }
+  } finally {
+    await db.close();
+  }
+}
+```
+
+For an **existing prepared database**:
+
+```sh
+serverpod_sql_check --database-check --database-target=existing
+serverpod_sql_check --database-check --database-target=existing --database-mode=test
+serverpod_sql_check --database-check --database-url-env=MY_TEST_DATABASE_URL
+```
+
+A populated `SQL_CHECK_DATABASE_URL`, or the explicitly selected variable,
+retains the previous URL-based behavior and takes priority over automatic
+connection discovery, including the project mode. An explicitly selected variable must be populated;
+combining a URL with an explicit temporary target is an error.
+Without a URL, existing mode reads the project configuration and attaches to a
+running embedded instance or connects through configured TCP coordinates.
+It never starts, migrates, prepares or deletes that database. Start Serverpod or
+`serverpod database start` if the embedded instance is stopped. Supply a URL for
+connection configuration replaced by application Dart code.
+
+URLs and passwords are not printed. The report shows the target, backend, mode,
+server/parser versions, effective role/search path and separate startup,
+preparation and validation durations. An explicit search path wins over project
+configuration; URL-only mode retains the role's path unless overridden. Changes
+use a parameterized command. Unsupported majors and explicit parser mismatches
+fail with code 2. Backend, image and setup options require a temporary target.
+
+Preparation can execute migrations and the explicit hook **only on the isolated
+instance**. Preparation stages have a 120-second limit; downloads/pulls have a
+five-minute limit. Cleanup closes connections and removes only checker-owned
+resources, including on SIGINT/SIGTERM; failures are operational errors.
+Temporary schemas do not reproduce another database's manual changes, data or
+role grants. Use a prepared database when those differences matter.
 
 Schema checks cover statically resolved `unsafeQuery` and `unsafeExecute` calls
 and complete statements in `.sql` files. The checker uses the native parse tree
@@ -104,13 +199,17 @@ to isolate statements and permits only `SELECT`, `VALUES`, `INSERT`, `UPDATE`,
 using the extended protocol to reject multiple top-level commands. It never sends
 the scanned queries for execution, `EXECUTE`, or `EXPLAIN ANALYZE`. The session is
 read-only, with a 10-second connection limit and a 5-second command limit.
-Use a test database; no production connection is discovered automatically.
+Automatic configuration modes are restricted to test and development.
 
 Repeated named parameters such as `@id` become the same positional parameter.
 Existing `$1` parameters are preserved. PostgreSQL infers parameter types where
 possible; indeterminate types and mixed named/positional conventions are reported
-as **not covered**, without fabricated values. Raw query calls with several
-statements fail; `.sql` scripts are checked statement by statement.
+as **not covered**, without fabricated values. `unsafeQuery` calls with several
+statements fail. `unsafeExecute` without parameters permits multiple statements,
+matching the driver's simple-protocol behavior; supported statements in those
+batches and `.sql` scripts are checked separately. Parameterized raw calls still
+require a single statement. DDL and procedural statements in batches remain
+syntax-only and are never executed by validation.
 
 Constants and fragments not used in raw calls remain syntax-only. DDL, `DO`,
 `CALL`, `COPY`, and PL/pgSQL definitions are not validated against the schema or
@@ -134,6 +233,14 @@ approximately 42 ms offline and 95 ms connected to PostgreSQL 17 in Docker
 (median of three runs after warmup). Coverage was identical, and only 20
 preparations were needed. This excludes database startup and schema setup; the
 added cost depends on query count and database latency.
+
+A macOS Serverpod 4 fixture with system migrations and the phased custom-schema
+hook took about 32 seconds to prepare with an empty embedded binary cache
+(20 seconds startup/download and 12 seconds preparation), and 21 seconds with
+that cache reused (7 seconds startup and 14 seconds preparation). These single
+runs include compiling the project's Dart helpers; the cold run uses a private
+cache rather than clearing the project's cache. Network, framework size and
+machine load affect these figures. The CLI reports each duration separately.
 
 For programmatic CLI use, `checkSql(arguments)` now returns `Future<void>`;
 await it before reading `exitCode` or terminating the process.
@@ -412,7 +519,7 @@ finite loops, helper assignments and switches, correlated bindings, aliases,
 side effects, and original fragment locations on both PostgreSQL versions.
 
 Database integration tests require `SQL_CHECK_TEST_DATABASE_URL` pointing to a
-disposable PostgreSQL 17/18 database. The fixture connection needs privileges to
+disposable PostgreSQL 16/17/18 database. The fixture connection needs privileges to
 create and remove a dedicated schema and login role; the CLI uses that separate
 role and a read-only session. Without the variable, these integration tests are
 skipped and the ordinary suite needs no database.
@@ -422,6 +529,20 @@ dart test test/database_check_test.dart test/database_integration_test.dart \
   --concurrency=1 --timeout=3m
 ```
 
-CI runs these tests on PostgreSQL 17 and 18, including schema failures, source
+CI runs these tests on PostgreSQL 16, 17 and 18, including schema failures, source
 mapping, parameter handling, cleanup, timeouts, and unchanged data after checking
 write statements.
+
+Database lifecycle tests are opt-in and prepare isolated fixture projects:
+
+```sh
+SQL_CHECK_TEST_LIFECYCLE=1 SQL_CHECK_TEST_BACKEND=docker \
+  SQL_CHECK_TEST_SERVERPOD=3.4.13 dart test test/database_lifecycle_test.dart --timeout=10m
+SQL_CHECK_TEST_LIFECYCLE=1 SQL_CHECK_TEST_BACKEND=embedded \
+  SQL_CHECK_TEST_SERVERPOD=4.0.2 dart test test/database_lifecycle_test.dart --timeout=10m
+```
+
+Docker fixtures default to PostgreSQL 16; set `SQL_CHECK_TEST_DOCKER_IMAGE` and
+`SQL_CHECK_TEST_MAJOR` together for 17/18. These tests require Dart on PATH and
+may resolve fixture dependencies or download embedded binaries. Ordinary tests
+need no database, Docker or additional project dependencies.

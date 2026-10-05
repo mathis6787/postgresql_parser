@@ -62,8 +62,8 @@ Future<void> main(List<String> args) async {
 
 int _parseMajor(String value) {
   final major = int.tryParse(value);
-  if (major == null || major < 17) {
-    throw const FormatException('Major version must be an integer >= 17.');
+  if (major == null || major < 16) {
+    throw const FormatException('Major version must be an integer >= 16.');
   }
   return major;
 }
@@ -202,10 +202,10 @@ Future<void> _showAvailable(String? jsonFile) async {
   final majors = <int>{};
   for (final tag in tags) {
     final major = int.parse(tag.split(RegExp(r'[-.]')).first);
-    if (major >= 17) majors.add(major);
+    if (major >= 16) majors.add(major);
   }
   if (majors.isEmpty) {
-    stdout.writeln('No published libpg_query releases for PostgreSQL 17+.');
+    stdout.writeln('No published libpg_query releases for PostgreSQL 16+.');
     return;
   }
   for (final major in majors.toList()..sort()) {
@@ -409,6 +409,14 @@ Future<void> _changeVersion(List<String> args) async {
       await _generateProtobufC(releaseSource);
     }
     _checkUpstream(releaseSource, runtime);
+    if (major == 16) {
+      final copyright = File('${releaseSource.path}/src/postgres/COPYRIGHT');
+      if (!copyright.existsSync()) {
+        await File('$packageRoot/tool/licenses/postgresql16_COPYRIGHT')
+            .copy(copyright.path);
+      }
+      await applyMacosStrchrnulFix(releaseSource);
+    }
     final patchedPlpgsql = await applyPlpgsqlCompatibilityFix(releaseSource);
 
     final staged = Directory('${temporary.path}/pg$major');
@@ -417,7 +425,8 @@ Future<void> _changeVersion(List<String> args) async {
     for (final path in [
       'LICENSE',
       'pg_query.h',
-      'postgres_deparse.h',
+      if (File('${releaseSource.path}/postgres_deparse.h').existsSync())
+        'postgres_deparse.h',
       'protobuf',
       'src',
     ]) {
@@ -459,13 +468,22 @@ Future<void> _changeVersion(List<String> args) async {
     final checksumLine = archiveSha256 == null
         ? ''
         : '- Source archive SHA-256: `$archiveSha256`\n';
-    final patchNote = !patchedPlpgsql
+    var patchNote = !patchedPlpgsql
         ? ''
         : '\n## Local compatibility patch\n\n'
               '`src/pg_query_json_plpgsql.c` serializes '
               '`PLPGSQL_DTYPE_PROMISE` with `dump_var`, matching its '
               '`PLpgSQL_var` representation. This fixes malformed JSON '
               'for trigger variables. The upstream pin is unchanged.\n';
+    if (major == 16) {
+      patchNote +=
+          '\nPostgreSQL 16 archives omit `COPYRIGHT`; its retained '
+          'notice comes from [PostgreSQL REL_16_1]'
+          '(https://github.com/postgres/postgres/blob/REL_16_1/COPYRIGHT). '
+          'On macOS, the local `strchrnul` fallback is renamed after system '
+          'includes to avoid a collision with the macOS 15.4 SDK while '
+          'preserving older deployment targets.\n';
+    }
     await File('${staged.path}/UPSTREAM.md')
         .writeAsString('''# Vendored PostgreSQL $major parser source
 
@@ -606,6 +624,21 @@ Future<bool> applyPlpgsqlCompatibilityFix(Directory source) async {
   return true;
 }
 
+/// PG16 predates the macOS 15.4 strchrnul declaration. Rename its local
+/// fallback after system includes so older deployment targets still work.
+Future<void> applyMacosStrchrnulFix(Directory source) async {
+  final file = File('${source.path}/src/postgres/src_port_snprintf.c');
+  final original = await file.readAsString();
+  if (original.contains('#define strchrnul pgp16_strchrnul')) return;
+  await file.writeAsString(
+    original.replaceFirst(
+      '#ifndef HAVE_STRCHRNUL',
+      '#if defined(__APPLE__) && !defined(HAVE_STRCHRNUL)\n'
+          '#define strchrnul pgp16_strchrnul\n#endif\n\n#ifndef HAVE_STRCHRNUL',
+    ),
+  );
+}
+
 Future<void> _updateInstalledVersion(
   Directory target,
   Directory staged,
@@ -686,7 +719,10 @@ void _checkUpstream(Directory source, _ProtobufRuntime runtime) {
   for (final path in [
     'LICENSE',
     'pg_query.h',
-    'src/postgres/COPYRIGHT',
+    if (!File('${source.path}/pg_query.h')
+        .readAsStringSync()
+        .contains('#define PG_MAJORVERSION "16"'))
+      'src/postgres/COPYRIGHT',
     'src/pg_query_parse.c',
     'src/pg_query_parse_plpgsql.c',
     'src/pg_query_json_plpgsql.c',

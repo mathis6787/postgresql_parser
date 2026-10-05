@@ -140,7 +140,7 @@ Future<ProcessResult> _run(
 ], workingDirectory: Directory.current.path);
 
 void main() {
-  for (final major in [17, 18]) {
+  for (final major in [16, 17, 18]) {
     group('PL/pgSQL PostgreSQL $major', () {
       late Directory directory;
       late ProcessResult result;

@@ -4,7 +4,10 @@ import 'dart:io';
 import 'package:test/test.dart';
 
 import '../tool/add_postgres_version.dart'
-    show applyPlpgsqlCompatibilityFix, installStagedVersion;
+    show
+        applyMacosStrchrnulFix,
+        applyPlpgsqlCompatibilityFix,
+        installStagedVersion;
 import '../tool/ffigen.dart' show generateBindings;
 
 Future<File> _write(Directory root, String path, String content) async {
@@ -40,6 +43,31 @@ Future<Directory> _stage(Directory temporary, {bool invalid = false}) async {
 }
 
 void main() {
+  test(
+    'PostgreSQL 16 macOS compatibility patch preserves system declarations',
+    () async {
+      final temporary = await Directory.systemTemp.createTemp(
+        'pg-macos-patch-',
+      );
+      try {
+        final path = 'src/postgres/src_port_snprintf.c';
+        final source = await File('native/pg16/libpg_query/$path')
+            .readAsString();
+        final original = source.replaceAll(
+          '#if defined(__APPLE__) && !defined(HAVE_STRCHRNUL)\n#define strchrnul pgp16_strchrnul\n#endif\n\n',
+          '',
+        );
+        expect(original, isNot(source));
+        final file = await _write(temporary, path, original);
+        await applyMacosStrchrnulFix(temporary);
+        expect(await file.readAsString(), source);
+        await applyMacosStrchrnulFix(temporary);
+        expect(await file.readAsString(), source);
+      } finally {
+        await temporary.delete(recursive: true);
+      }
+    },
+  );
   test(
     'generates a staged version from its header and installs its registry',
     () async {

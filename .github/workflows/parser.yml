@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        postgres: ['17', '18']
+        postgres: ['16', '17', '18']
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -54,4 +54,46 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y clang
       - run: dart pub get
       - run: dart test test/database_check_test.dart test/database_integration_test.dart --concurrency=1 --timeout=3m
+        working-directory: packages/serverpod_sql_check
+
+  temporary-docker:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        serverpod: ['3.4.13', '4.0.2']
+        postgres: ['16', '17', '18']
+    env:
+      SQL_CHECK_TEST_LIFECYCLE: '1'
+      SQL_CHECK_TEST_BACKEND: docker
+      SQL_CHECK_TEST_SERVERPOD: ${{ matrix.serverpod }}
+      SQL_CHECK_TEST_DOCKER_IMAGE: postgres:${{ matrix.postgres }}
+      SQL_CHECK_TEST_MAJOR: ${{ matrix.postgres }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.13.4
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - run: dart pub get
+      - run: dart test test/database_lifecycle_test.dart --concurrency=1 --timeout=10m
+        working-directory: packages/serverpod_sql_check
+
+  temporary-embedded:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      SQL_CHECK_TEST_LIFECYCLE: '1'
+      SQL_CHECK_TEST_BACKEND: embedded
+      SQL_CHECK_TEST_SERVERPOD: '4.0.2'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.13.4
+      - run: sudo apt-get update && sudo apt-get install -y clang
+        if: runner.os == 'Linux'
+      - run: dart pub get
+      - run: dart test test/database_lifecycle_test.dart --concurrency=1 --timeout=10m
         working-directory: packages/serverpod_sql_check

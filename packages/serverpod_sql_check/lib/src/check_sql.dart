@@ -1,6 +1,7 @@
 /// Checks SQL with the local postgresql_parser package, without executing it.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -16,6 +17,8 @@ import 'package:serverpod_sql_check/src/static_contexts.dart';
 import 'package:serverpod_sql_check/src/static_demand.dart';
 import 'package:serverpod_sql_check/src/server_discovery.dart';
 import 'package:serverpod_sql_check/src/database_check.dart';
+import 'package:serverpod_sql_check/src/database_lease.dart';
+import 'package:serverpod_sql_check/src/database_project.dart';
 import 'package:serverpod_sql_check/src/sql_parameters.dart';
 import 'package:postgresql_parser/postgresql_parser.dart';
 
@@ -63,6 +66,8 @@ Future<void> checkSql(List<String> args) async {
   var databaseUrlEnv = 'SQL_CHECK_DATABASE_URL';
   String? databaseSearchPath;
   var databaseOption = false;
+  var explicitDatabaseUrlEnv = false;
+  final databaseSettings = <String, String>{};
   String? explicitRoot;
   final paths = <String>[];
   for (final arg in args) {
@@ -71,8 +76,13 @@ Future<void> checkSql(List<String> args) async {
         'Usage: dart run serverpod_sql_check [options] [file or directory ...]\n'
         '  --include-migrations    Include migration SQL (excluded by default)\n'
         '  --include-tests         Include test/ and integration_test/ (excluded by default)\n'
-        '  --postgres-version=17   PostgreSQL grammar: 17 (default) or 18\n'
-        '  --database-check        Analyze supported SQL against a prepared test database\n'
+        '  --postgres-version=17   PostgreSQL grammar: 16, 17 (default) or 18\n'
+        '  --database-check        Analyze SQL using an isolated temporary database or supplied URL\n'
+        '  --database-target=temporary|existing Select the database lifecycle\n'
+        '  --database-backend=auto|embedded|docker Temporary instance backend\n'
+        '  --database-mode=test|development Project configuration mode\n'
+        '  --database-docker-image=<image> Override the temporary Docker image\n'
+        '  --database-setup=<file.dart> Temporary schema hook, before and after migrations\n'
         '  --database-url-env=<name> Connection URL variable (default SQL_CHECK_DATABASE_URL)\n'
         '  --database-search-path=<value> Override the database role search_path\n'
         '  --verbose               Print checked and skipped query locations\n'
@@ -97,6 +107,18 @@ Future<void> checkSql(List<String> args) async {
       databaseCheck = true;
     } else if (arg.startsWith('--database-url-env=')) {
       databaseUrlEnv = arg.substring('--database-url-env='.length);
+      explicitDatabaseUrlEnv = true;
+      databaseOption = true;
+    } else if (const [
+      'target',
+      'backend',
+      'mode',
+      'docker-image',
+      'setup',
+    ].any((name) => arg.startsWith('--database-$name='))) {
+      final equals = arg.indexOf('=');
+      databaseSettings[arg.substring('--database-'.length, equals)] = arg
+          .substring(equals + 1);
       databaseOption = true;
     } else if (arg.startsWith('--database-search-path=')) {
       databaseSearchPath = arg.substring('--database-search-path='.length);
@@ -151,19 +173,55 @@ Future<void> checkSql(List<String> args) async {
     stdout.writeln('Detected Serverpod server: $root');
   }
   DatabaseChecker? database;
+  DatabaseLease? lease;
+  final signalSubscriptions = <StreamSubscription<ProcessSignal>>[];
   if (databaseCheck) {
-    final url = Platform.environment[databaseUrlEnv];
-    if (url == null || url.trim().isEmpty) {
-      stderr.writeln(
-        'ERROR: Set $databaseUrlEnv to the connection URL of a prepared, disposable test database.',
-      );
-      exitCode = 2;
-      return;
-    }
     try {
+      lease = DatabaseLease();
+      for (final signal in [ProcessSignal.sigint, ProcessSignal.sigterm]) {
+        signalSubscriptions.add(
+          signal.watch().listen((_) async {
+            stderr.writeln(
+              'Database validation interrupted; cleaning up owned resources.',
+            );
+            try {
+              await database?.close();
+            } catch (_) {
+              stderr.writeln(
+                'ERROR: Database connection cleanup failed after interruption.',
+              );
+            }
+            try {
+              await lease?.close();
+            } catch (_) {
+              stderr.writeln(
+                'ERROR: Database resource cleanup failed after interruption.',
+              );
+            }
+            exit(2);
+          }),
+        );
+      }
+      await lease.open(
+        DatabaseOptions(
+          target: databaseSettings['target'],
+          backend: databaseSettings['backend'] ?? 'auto',
+          mode: databaseSettings['mode'],
+          image: databaseSettings['docker-image'],
+          setup: databaseSettings['setup'],
+          urlEnv: databaseUrlEnv,
+          explicitUrlEnv: explicitDatabaseUrlEnv,
+          searchPath: databaseSearchPath,
+        ),
+        Directory(root),
+        Platform.environment,
+      );
       database = await DatabaseChecker.open(
-        url,
-        searchPath: databaseSearchPath,
+        lease.url,
+        searchPath: lease.searchPath,
+      );
+      stdout.writeln(
+        'Database target: ${lease.target}; backend: ${lease.backend}${lease.mode == null ? '' : '; mode: ${lease.mode}'}.',
       );
       stdout.writeln(
         'Database PostgreSQL ${database.serverVersion}; role ${database.role}; search_path ${database.searchPath}.',
@@ -181,12 +239,25 @@ Future<void> checkSql(List<String> args) async {
         );
       }
       major = database.major;
-    } on DatabaseCheckException catch (error) {
-      stderr.writeln('ERROR: $error');
+      await lease.prepare(databaseSettings['setup']);
+    } catch (error) {
+      stderr.writeln(
+        'ERROR: ${error is DatabaseCheckException ? error.message : 'Could not initialize database validation. Check the project configuration and required tools.'}',
+      );
       try {
         await database?.close();
       } catch (_) {
-        // Keep connection failures sanitized.
+        stderr.writeln('ERROR: Could not close the database connection.');
+      }
+      try {
+        await lease?.close();
+      } catch (_) {
+        stderr.writeln(
+          'ERROR: Could not clean up all checker-owned database resources.',
+        );
+      }
+      for (final subscription in signalSubscriptions) {
+        await subscription.cancel();
       }
       exitCode = 2;
       return;
@@ -372,7 +443,18 @@ Future<void> checkSql(List<String> args) async {
               if (bodyFailed) failed++;
               if (database != null && (isSql || block.isRawQuery)) {
                 final statements = databaseStatements(result, prepared.text);
-                if (block.isRawQuery && statements.length > 1) {
+                // Serverpod's unsafeExecute ignores result rows. The postgres
+                // driver uses the simple protocol for that call when it has no
+                // parameters, which permits a batch of statements. Still
+                // validate eligible statements separately with PREPARE only.
+                final normalized = normalizeSqlParameters(text.text);
+                final permitsBatch =
+                    block.isUnparameterizedExecute &&
+                    normalized.namedOffsets.isEmpty &&
+                    !normalized.hasPositional;
+                if (block.isRawQuery &&
+                    statements.length > 1 &&
+                    !permitsBatch) {
                   databaseFailed++;
                   _reportSqlFailure(
                     _displayPath(file.absolute.path, root),
@@ -386,8 +468,7 @@ Future<void> checkSql(List<String> args) async {
                         : '',
                     root: root,
                   );
-                } else if (!isSql &&
-                    normalizeSqlParameters(text.text).mixesParameters) {
+                } else if (!isSql && normalized.mixesParameters) {
                   databaseSkip(
                     variantLabel,
                     'mixed named and positional parameters',
@@ -507,6 +588,9 @@ Future<void> checkSql(List<String> args) async {
     );
     if (database != null) {
       stdout.writeln(
+        'Database startup: ${lease!.startup.inMilliseconds} ms; schema preparation: ${lease.preparation.inMilliseconds} ms.',
+      );
+      stdout.writeln(
         'Checked $databaseChecked database statements; $databaseFailed failed; $databaseUncovered not covered.\n'
         'Database validation: ${database.elapsed.inMilliseconds} ms; ${database.preparations} unique preparations${database.stopped ? '; incomplete' : ''}.',
       );
@@ -532,6 +616,17 @@ Future<void> checkSql(List<String> args) async {
     } catch (_) {
       stderr.writeln('ERROR: Could not close the database connection.');
       exitCode = 2;
+    }
+    try {
+      await lease?.close();
+    } catch (_) {
+      stderr.writeln(
+        'ERROR: Could not clean up all checker-owned database resources.',
+      );
+      exitCode = 2;
+    }
+    for (final subscription in signalSubscriptions) {
+      await subscription.cancel();
     }
   }
 }
@@ -644,6 +739,7 @@ final class _Block {
     this.offset,
     this.variants, {
     this.isRawQuery = false,
+    this.isUnparameterizedExecute = false,
     this.bindings,
     this.variantBindings,
     this.reason = 'unresolved string reference or runtime SQL expression',
@@ -652,6 +748,7 @@ final class _Block {
   final List<_SqlText>? variants;
   final String reason;
   final bool isRawQuery;
+  final bool isUnparameterizedExecute;
   final NamedBindings? bindings;
   final List<NamedBindings?>? variantBindings;
 }
@@ -712,6 +809,9 @@ final class _SqlVisitor extends RecursiveAstVisitor<void> {
         force: true,
         parameters: parameters,
         bindings: _namedBindings(parameters, unit),
+        isUnparameterizedExecute:
+            node.methodName.name == 'unsafeExecute' &&
+            (parameters == null || parameters is NullLiteral),
       );
     }
     if (node.methodName.name == 'join' || node.methodName.name == 'toString') {
@@ -758,6 +858,7 @@ final class _SqlVisitor extends RecursiveAstVisitor<void> {
     bool force = false,
     Expression? parameters,
     NamedBindings? bindings,
+    bool isUnparameterizedExecute = false,
   }) {
     if (!force) {
       if (blocks[node.offset]?.isRawQuery ?? false) return;
@@ -797,6 +898,7 @@ final class _SqlVisitor extends RecursiveAstVisitor<void> {
         node.offset,
         variants,
         isRawQuery: force || (blocks[node.offset]?.isRawQuery ?? false),
+        isUnparameterizedExecute: isUnparameterizedExecute,
         bindings: bindings ?? blocks[node.offset]?.bindings,
         variantBindings: resolved?.bindings,
         reason:
