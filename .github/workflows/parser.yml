@@ -56,6 +56,22 @@ jobs:
       - run: dart test test/database_check_test.dart test/database_integration_test.dart --concurrency=1 --timeout=3m
         working-directory: packages/serverpod_sql_check
 
+  distribution:
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.13.4
+      - run: sudo apt-get update && sudo apt-get install -y clang
+        if: runner.os == 'Linux'
+      - run: dart pub get
+      - run: dart run tool/check_distribution.dart
+
   temporary-docker:
     runs-on: ubuntu-latest
     strategy:

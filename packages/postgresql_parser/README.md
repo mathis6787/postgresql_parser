@@ -26,6 +26,9 @@ and web are currently unsupported.
 dart pub add postgresql_parser
 ```
 
+Run the [standalone example](example/main.dart) with
+`dart run example/main.dart` from the package directory.
+
 ## Parse SQL
 
 ```dart
@@ -108,5 +111,11 @@ upstream version and is not a full database-side function validator.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and maintenance.
 
 The upstream source pins, local compatibility patches, and third-party license
-notices are documented in [PostgreSQL 17 source details](native/pg17/UPSTREAM.md)
-and [PostgreSQL 18 source details](native/pg18/UPSTREAM.md).
+notices are documented in [PostgreSQL 16 source details](native/pg16/UPSTREAM.md),
+[PostgreSQL 17 source details](native/pg17/UPSTREAM.md), and
+[PostgreSQL 18 source details](native/pg18/UPSTREAM.md).
+
+## License
+
+Original package code is licensed under [MIT](LICENSE). Vendored sources retain
+their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).

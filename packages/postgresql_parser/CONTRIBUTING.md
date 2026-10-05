@@ -125,7 +125,8 @@ to the current pin is a no-op.
 
 ### Source provenance and compatibility
 
-Source details live in [PostgreSQL 17's UPSTREAM.md](native/pg17/UPSTREAM.md) and
+Source details live in [PostgreSQL 16's UPSTREAM.md](native/pg16/UPSTREAM.md),
+[PostgreSQL 17's UPSTREAM.md](native/pg17/UPSTREAM.md) and
 [PostgreSQL 18's UPSTREAM.md](native/pg18/UPSTREAM.md). Keep the upstream licenses
 and PostgreSQL copyright notices when vendoring or updating sources.
 
@@ -146,16 +147,13 @@ API checks do not replace reviewing bridge and build compatibility.
 
 ## Prepare a release
 
-Publish from `packages/postgresql_parser`, not the workspace root. Before the
-first release:
-
-- Choose the package license and add a package-root `LICENSE`; retain all
-  third-party license notices.
-- Add a package-root `CHANGELOG.md` and confirm the intended version.
-- Set the package's repository and issue-tracker metadata in `pubspec.yaml`.
-- Remove `publish_to: none` from the parser package when preparing to publish.
-  Keep it on the workspace root and the unpublished `serverpod_sql_check` package.
-- Verify the README examples and all checks on macOS and Linux.
+Publish from `packages/postgresql_parser`, not the private workspace root.
+Confirm the version and changelog, retain [third-party notices](THIRD_PARTY_NOTICES.md),
+and require all checks on macOS and Linux to pass. Original package code is MIT.
+From the repository root, run `dart run tool/check_distribution.dart` to verify
+publication archives, the standalone parser consumer and installation of the CLI
+outside the workspace. Publish the parser before the dependent CLI; see the
+[release guide](https://github.com/mathis6787/postgresql_parser/blob/main/RELEASING.md).
 
 Then inspect the publication with:
 

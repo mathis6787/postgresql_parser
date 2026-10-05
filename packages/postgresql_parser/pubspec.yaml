@@ -1,7 +1,12 @@
 name: postgresql_parser
 description: PostgreSQL SQL and PL/pgSQL parsing backed by a versioned libpg_query native library.
 version: 0.1.0
-publish_to: none
+repository: https://github.com/mathis6787/postgresql_parser/tree/main/packages/postgresql_parser
+issue_tracker: https://github.com/mathis6787/postgresql_parser/issues
+topics: [postgresql, sql, parser, ffi]
+platforms:
+  linux:
+  macos:
 
 environment:
   sdk: ^3.13.4
@@ -13,5 +18,6 @@ dependencies:
   hooks: ^2.2.0
   native_toolchain_c: ^0.19.5
 dev_dependencies:
-  ffigen: ^22.0.0
+  # Exclude the retracted 22.1.0 release; keep generation reproducible.
+  ffigen: '>=22.0.0 <22.1.0'
   test: ^1.32.0

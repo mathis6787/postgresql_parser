@@ -22,6 +22,10 @@ publishable package.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, binding generation,
 PostgreSQL version maintenance, and release preparation.
 
+Original repository code is [MIT licensed](LICENSE). See the parser's
+[third-party notices](packages/postgresql_parser/THIRD_PARTY_NOTICES.md) for native
+sources and [RELEASING.md](RELEASING.md) for distribution checks and publication.
+
 ## Check Serverpod SQL
 
 The [serverpod_sql_check package](packages/serverpod_sql_check/README.md) scans
