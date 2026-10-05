@@ -1,14 +1,35 @@
 # serverpod_sql_check
 
 Static SQL, PL/pgSQL, and named parameter binding checks for Dart and Serverpod
-projects, using the sibling `postgresql_parser` package. By default, SQL is
+projects, using the `postgresql_parser` package. By default, SQL is
 parsed without being executed or connecting to a database. An optional mode
 also analyzes supported queries against a prepared test database schema.
 
-## Run
+## Install and run
 
-This package is part of the `postgresql_parser` Dart pub workspace. Run from the
-workspace root with Dart 3.13.4+ and a C compiler such as Clang:
+Requires Dart 3.13.4+ and macOS or Linux with a C compiler (Xcode command line
+tools on macOS, Clang on Linux). Windows and web are unsupported.
+
+Install the command from pub.dev:
+
+```sh
+dart install serverpod_sql_check
+serverpod_sql_check
+```
+
+Follow Dart's installation output to add its executable directory to `PATH`.
+Installation compiles and bundles the parser's native libraries. libclang and
+ffigen are not needed by users. Temporary database preparation also requires a
+Dart SDK on `PATH` for project helper processes.
+
+To use the checker as a development dependency instead:
+
+```sh
+dart pub add --dev serverpod_sql_check
+dart run serverpod_sql_check --root=/path/to/server
+```
+
+For development from this repository, run from the workspace root:
 
 ```sh
 dart pub get
@@ -16,7 +37,7 @@ dart run serverpod_sql_check --root=/path/to/server
 ```
 
 The first run builds the parser's native assets automatically. PostgreSQL 17 is
-the default grammar; PostgreSQL 18 is also supported.
+the default grammar; PostgreSQL 16 and 18 are also supported.
 
 ```sh
 dart run serverpod_sql_check --root=/path/to/server --verbose
@@ -26,6 +47,10 @@ dart run serverpod_sql_check --root=/path/to/server --postgres-version=18
 dart run serverpod_sql_check /path/to/query.sql /path/to/service.dart
 dart run serverpod_sql_check --help
 ```
+
+Try the [sample SQL script](example/query.sql) with
+`serverpod_sql_check /path/to/example/query.sql`. Parsing never executes its
+procedural body.
 
 When the executable is on your `PATH`, run it anywhere inside a Serverpod project:
 
@@ -191,6 +216,18 @@ five-minute limit. Cleanup closes connections and removes only checker-owned
 resources, including on SIGINT/SIGTERM; failures are operational errors.
 Temporary schemas do not reproduce another database's manual changes, data or
 role grants. Use a prepared database when those differences matter.
+
+A successful checker result applies only to covered queries. It does not mean
+Serverpod's full schema verification passed: PREPARE does not validate every
+index or constraint. Check the exit status of schema preparation separately.
+In CI, use `prepare-command && serverpod_sql_check --database-check ...` so a
+preparation failure cannot be hidden by a successful checker run. Application
+initializers after `pod.start()` are not run by the temporary maintenance helper
+and may be skipped by a maintenance invocation of the application itself. Put
+custom schema setup in the explicit hook rather than relying on application
+startup. If the generated schema expects those objects during migration
+verification, they must already exist at that point; an after-migrations hook
+cannot repair an earlier verification failure.
 
 Schema checks cover statically resolved `unsafeQuery` and `unsafeExecute` calls
 and complete statements in `.sql` files. The checker uses the native parse tree
@@ -516,7 +553,7 @@ re-exports, helper branches, call bindings, cross-file error locations, and
 conservative handling of unknown or ambiguous source.
 They also cover records and constructor fields, collection and buffer assembly,
 finite loops, helper assignments and switches, correlated bindings, aliases,
-side effects, and original fragment locations on both PostgreSQL versions.
+side effects, and original fragment locations on all supported PostgreSQL versions.
 
 Database integration tests require `SQL_CHECK_TEST_DATABASE_URL` pointing to a
 disposable PostgreSQL 16/17/18 database. The fixture connection needs privileges to
@@ -546,3 +583,9 @@ Docker fixtures default to PostgreSQL 16; set `SQL_CHECK_TEST_DOCKER_IMAGE` and
 `SQL_CHECK_TEST_MAJOR` together for 17/18. These tests require Dart on PATH and
 may resolve fixture dependencies or download embedded binaries. Ordinary tests
 need no database, Docker or additional project dependencies.
+
+## Contributing and license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and release checks.
+Original CLI code is licensed under [MIT](LICENSE). The native parser dependency
+retains its own third-party notices.
