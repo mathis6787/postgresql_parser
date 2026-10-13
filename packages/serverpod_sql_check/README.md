@@ -48,9 +48,18 @@ dart run serverpod_sql_check /path/to/query.sql /path/to/service.dart
 dart run serverpod_sql_check --help
 ```
 
-Try the [sample SQL script](example/query.sql) with
-`serverpod_sql_check /path/to/example/query.sql`. Parsing never executes its
-procedural body.
+Try the [runnable Dart example](example/main.dart) from this package directory:
+
+```sh
+dart run example/main.dart
+```
+
+It checks the [sample SQL script](example/query.sql) through the public `checkSql`
+API and prints verbose diagnostics and a summary. No database is needed, and
+parsing never executes its procedural bodies. The sample intentionally includes
+invalid SQL and PL/pgSQL syntax, so an exit code of `1` is expected. Fix or comment
+out the invalid `SELECT` to see the PL/pgSQL error next. To check the same script with the
+installed CLI, run `serverpod_sql_check /path/to/example/query.sql`.
 
 When the executable is on your `PATH`, run it anywhere inside a Serverpod project:
 
