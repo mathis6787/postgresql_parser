@@ -100,6 +100,58 @@ setup and cleanup queries. Intentionally invalid SQL in tests is reported as a
 failure. This option is also required when passing a test file or directory
 explicitly; `--include-migrations` independently enables migration SQL.
 
+## psql scripts
+
+SQL files and statically readable Dart SQL templates can contain a standalone
+`\gexec` line. This command belongs to the `psql` client rather than the PostgreSQL
+SQL grammar. The checker treats it as a query terminator for analysis only,
+preserving the original source locations:
+
+```sql
+SELECT format('CREATE DATABASE %I', 'example_tenant')
+WHERE NOT EXISTS (
+  SELECT 1 FROM pg_database WHERE datname = 'example_tenant'
+)
+\gexec
+```
+
+The source `SELECT` receives ordinary syntax checking. The checker then reads
+each output column associated with `\gexec`, reconstructs constant commands and
+checks their SQL and PL/pgSQL syntax with the selected PostgreSQL grammar. It
+supports text constants, string concatenation with `||`, known `::text` casts,
+and built-in `format()` with readable constant arguments. `%s`, `%I`, `%L`, `%%`,
+argument positions and widths follow PostgreSQL formatting rules. Identifier
+quoting uses the selected grammar's keyword categories. Known `NULL` output
+cells are ignored, as they are by `psql`.
+
+For example, `SELECT 'CREAT DATABASE demo'` followed by `\gexec` fails with a
+`PSQL GENERATED SQL` diagnostic pointing to its source expression. A constant
+`format('CREATE DATABASE %I', 'example_tenant')` is also checked. A `WHERE NOT
+EXISTS` guard does not prevent checking that possible constant output, but the
+checker does not determine whether the query returns any rows.
+Literal `WHERE false`/`WHERE NULL` conditions and `LIMIT 0` are recognized as
+empty result sets; their commands are not generated or checked.
+
+Columns, aggregates such as `string_agg`, custom functions, unsupported result
+shapes or expressions, and exceeded limits print `NOT COVERED PSQL` with a reason.
+Readable output columns are still checked when another column is unknown. The
+summary separately counts generated outputs checked, failed and not covered.
+Evaluation is limited to 32 expression levels, 32 columns per query and 65,536
+UTF-16 code units per output. No query, function, or generated command is executed.
+Generated commands receive syntax validation only; in database mode, schema
+validation continues to cover eligible source statements, not generated commands.
+
+Support is limited to `\gexec` on its own line without arguments. Other unquoted
+backslash commands, including inline forms, leave the entire script/template
+unchecked with a visible `SKIP PSQL` reason and a separate summary count. Commands
+inside quoted strings, identifiers, comments, or dollar-quoted bodies are ordinary
+SQL content and are preserved. Variables, conditional commands, and includes are
+not interpreted.
+
+Direct `unsafeQuery` and `unsafeExecute` calls still reject psql commands: their
+text goes to the database server without a `psql` client. A syntax-only success
+for a Dart template does not establish how the application uses it.
+
 ## Optional database validation
 
 Syntax checking accepts `SELECT label FROM productz;` even if `productz` does
@@ -538,7 +590,8 @@ the PL/pgSQL failure summary.
 Exit codes:
 
 - `0`: completed checks passed; some checks may have been skipped.
-- `1`: SQL syntax errors, PL/pgSQL body errors, missing named bindings, or
+- `1`: SQL syntax errors, PL/pgSQL body errors, invalid constant psql generation,
+  missing named bindings, or
   database statement errors.
 - `2`: invalid options, missing or ambiguous server discovery, file access
   errors, database configuration/version errors, or interrupted database checks.

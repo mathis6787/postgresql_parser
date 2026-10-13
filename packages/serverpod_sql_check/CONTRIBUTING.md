@@ -20,6 +20,15 @@ relevant existing tests. Keep SQL extraction conservative: report unresolved
 runtime input instead of claiming it was checked. Preserve source positions,
 version isolation and distinct syntax/binding/schema results.
 
+When updating a pinned PostgreSQL grammar, refresh the identifier keyword
+categories used by constant psql `format('%I', ...)` evaluation:
+
+```sh
+dart run tool/generate_psql_keywords.dart
+dart format lib/src/psql_keywords.dart
+dart test test/generated_sql_test.dart test/psql_script_test.dart --concurrency=1
+```
+
 The [README](README.md) documents opt-in database integration and lifecycle tests.
 Use only disposable databases. Schema validation uses PREPARE/DEALLOCATE, never
 execution of extracted SQL; preparation may execute migrations and an explicit

@@ -114,17 +114,38 @@ dependencies:
     final executable =
         '${environment['DART_DATA_HOME']}/install/bin/serverpod_sql_check';
     await run(executable, ['--help'], cwd: temporary.path);
+    final valid = File('${temporary.path}/valid.sql');
+    await valid.writeAsString(r'''
+SELECT format('CREATE DATABASE %I', 'distribution_example')
+\gexec
+DO $$ BEGIN NULL; END; $$;
+''');
     for (final major in [16, 17, 18]) {
       final result = await run(executable, [
-        '${checker.path}/example/query.sql',
+        valid.path,
         '--postgres-version=$major',
       ], cwd: temporary.path);
       if (!result.stdout.toString().contains('0 failed') ||
           !result.stdout.toString().contains(
             'Checked 1 PL/pgSQL definitions',
+          ) ||
+          !result.stdout.toString().contains(
+            'Checked 1 generated SQL outputs; 0 failed; 0 not covered.',
           )) {
         throw StateError(
           'Installed CLI did not validate SQL and PL/pgSQL for $major.',
+        );
+      }
+      // The published example deliberately demonstrates a syntax failure.
+      final example = await run(
+        executable,
+        ['${checker.path}/example/query.sql', '--postgres-version=$major'],
+        cwd: temporary.path,
+        expectedExit: 1,
+      );
+      if (!example.stderr.toString().contains('syntax error')) {
+        throw StateError(
+          'Published CLI example did not demonstrate a syntax failure for $major.',
         );
       }
     }

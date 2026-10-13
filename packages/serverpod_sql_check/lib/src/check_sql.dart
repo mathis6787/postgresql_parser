@@ -20,6 +20,8 @@ import 'package:serverpod_sql_check/src/database_check.dart';
 import 'package:serverpod_sql_check/src/database_lease.dart';
 import 'package:serverpod_sql_check/src/database_project.dart';
 import 'package:serverpod_sql_check/src/sql_parameters.dart';
+import 'package:serverpod_sql_check/src/psql_script.dart';
+import 'package:serverpod_sql_check/src/generated_sql.dart';
 import 'package:postgresql_parser/postgresql_parser.dart';
 
 const _sqlKeywords = [
@@ -294,6 +296,11 @@ Future<void> checkSql(List<String> args) async {
     var dartFiles = 0;
     var plpgsqlChecked = 0;
     var plpgsqlFailed = 0;
+    var psqlCommands = 0;
+    var psqlChecked = 0;
+    var psqlFailures = 0;
+    var psqlUncovered = 0;
+    var psqlSkipped = 0;
     var databaseChecked = 0;
     var databaseFailed = 0;
     var databaseUncovered = 0;
@@ -340,17 +347,33 @@ Future<void> checkSql(List<String> args) async {
           for (var variant = 0; variant < block.variants!.length; variant++) {
             final text = block.variants![variant];
             if (text.text.trim().isEmpty) continue;
-            final parameterOffsets = <String, int>{};
-            final prepared = isSql
-                ? text
-                : _normalizeParameters(
-                    text,
-                    parameterOffsets: parameterOffsets,
-                  );
-            final sql = prepared.text;
             final variantLabel = block.variants!.length == 1
                 ? label
                 : '$label (variant ${variant + 1})';
+            // Raw driver calls must contain server SQL, never psql commands.
+            final psql = block.isRawQuery ? null : preparePsqlScript(text.text);
+            if (psql?.unsupported != null) {
+              psqlSkipped++;
+              stdout.writeln('SKIP PSQL $variantLabel (${psql!.unsupported})');
+              if (database != null && isSql) {
+                databaseSkip(variantLabel, psql.unsupported!);
+              }
+              continue;
+            }
+            final hasPsql = psql != null && psql.gexecOffsets.isNotEmpty;
+            if (hasPsql) psqlCommands += psql.gexecOffsets.length;
+            final script = psql == null
+                ? text
+                : _SqlText(psql.sql, text.origins, text.endOrigin);
+            final parameterOffsets = <String, int>{};
+            // psql output is server SQL; Serverpod's @bindings do not apply.
+            final prepared = isSql || hasPsql
+                ? script
+                : _normalizeParameters(
+                    script,
+                    parameterOffsets: parameterOffsets,
+                  );
+            final sql = prepared.text;
             var missingBindings = false;
             final bindings = block.variantBindings?[variant] ?? block.bindings;
             if (bindings != null && parameterOffsets.isNotEmpty) {
@@ -403,7 +426,7 @@ Future<void> checkSql(List<String> args) async {
             checked++;
             try {
               final result = parser.parse(sql);
-              var bodyFailed = false;
+              var variantFailed = false;
               for (final definition in _plpgsqlStatements(result, prepared)) {
                 final statement = definition.sql;
                 plpgsqlChecked++;
@@ -419,7 +442,7 @@ Future<void> checkSql(List<String> args) async {
                   }
                   parser.parsePlpgsql(statement.text);
                 } on PostgresParseException catch (error) {
-                  bodyFailed = true;
+                  variantFailed = true;
                   plpgsqlFailed++;
                   _reportSqlFailure(
                     _displayPath(file.absolute.path, root),
@@ -440,7 +463,116 @@ Future<void> checkSql(List<String> args) async {
                   );
                 }
               }
-              if (bodyFailed) failed++;
+              if (hasPsql) {
+                for (final generated in generatedPsqlSql(
+                  result,
+                  sql,
+                  psql.gexecOffsets,
+                )) {
+                  if (generated.reason != null) {
+                    psqlUncovered++;
+                    stdout.writeln(
+                      'NOT COVERED PSQL $variantLabel (${generated.reason})',
+                    );
+                    continue;
+                  }
+                  psqlChecked++;
+                  final origin = prepared.origins == null
+                      ? null
+                      : prepared.origins![generated.expressionOffset];
+                  final suffix = block.variants!.length > 1
+                      ? ' (variant ${variant + 1})'
+                      : '';
+                  void reportGenerated(String message, {String? detail}) {
+                    _reportSqlFailure(
+                      _displayPath(file.absolute.path, root),
+                      source,
+                      block.offset,
+                      prepared,
+                      null,
+                      'PSQL GENERATED SQL: $message',
+                      suffix,
+                      root: root,
+                      blockOrigin: origin,
+                      positionDetail:
+                          detail ?? 'constant SQL generation failed',
+                      blockLocationNote: origin == null
+                          ? 'generated SQL source block starts here'
+                          : 'generated SQL expression starts here',
+                    );
+                  }
+
+                  if (generated.error != null) {
+                    variantFailed = true;
+                    psqlFailures++;
+                    reportGenerated(generated.error!);
+                    continue;
+                  }
+                  if (generated.sql == null) {
+                    if (verbose) {
+                      stdout.writeln(
+                        'OK PSQL $variantLabel (${generated.ignoredReason})',
+                      );
+                    }
+                    continue;
+                  }
+                  try {
+                    final generatedResult = parser.parse(generated.sql!);
+                    var generatedFailed = false;
+                    for (final definition in _plpgsqlStatements(
+                      generatedResult,
+                      _SqlText(
+                        generated.sql!,
+                        null,
+                        origin ?? prepared.endOrigin,
+                      ),
+                    )) {
+                      plpgsqlChecked++;
+                      try {
+                        if (!definition.hasBody) {
+                          throw PostgresParseException(
+                            version: parser.version,
+                            message: 'definition requires an AS body',
+                            cursorPosition: 0,
+                          );
+                        }
+                        parser.parsePlpgsql(definition.sql.text);
+                      } on PostgresParseException catch (error) {
+                        generatedFailed = true;
+                        plpgsqlFailed++;
+                        reportGenerated(
+                          'PL/pgSQL: ${error.message}',
+                          detail: error.cursorPosition > 0
+                              ? 'generated PL/pgSQL parser position ${error.cursorPosition}'
+                              : 'generated PL/pgSQL parser provided no error position',
+                        );
+                      }
+                    }
+                    if (generatedFailed) {
+                      psqlFailures++;
+                      variantFailed = true;
+                    } else if (verbose) {
+                      stdout.writeln('OK PSQL GENERATED SQL $variantLabel');
+                    }
+                  } on PostgresParseException catch (error) {
+                    variantFailed = true;
+                    psqlFailures++;
+                    final before = error.cursorPosition > 0
+                        ? String.fromCharCodes(
+                            generated.sql!.runes.take(error.cursorPosition - 1),
+                          )
+                        : '';
+                    reportGenerated(
+                      error.message,
+                      detail: error.cursorPosition > 0
+                          ? 'generated SQL line ${'\n'.allMatches(before).length + 1}, '
+                                'column ${before.substring(before.lastIndexOf('\n') + 1).runes.length + 1}'
+                          : 'generated SQL parser provided no error position',
+                    );
+                  }
+                }
+              }
+              if (variantFailed) failed++;
               if (database != null && (isSql || block.isRawQuery)) {
                 final statements = databaseStatements(result, prepared.text);
                 // Serverpod's unsafeExecute ignores result rows. The postgres
@@ -527,12 +659,18 @@ Future<void> checkSql(List<String> args) async {
                   }
                 }
               }
-              if (verbose && !missingBindings && !bodyFailed) {
+              if (verbose && !missingBindings && !variantFailed) {
                 stdout.writeln(
                   '${database == null ? 'OK' : 'OK SYNTAX'} $variantLabel',
                 );
               }
             } on PostgresParseException catch (error) {
+              if (hasPsql) {
+                psqlUncovered += psql.gexecOffsets.length;
+                stdout.writeln(
+                  'NOT COVERED PSQL $variantLabel (source SQL syntax check failed)',
+                );
+              }
               if (database != null && (isSql || block.isRawQuery)) {
                 databaseSkip(variantLabel, 'SQL syntax check failed');
               }
@@ -540,6 +678,7 @@ Future<void> checkSql(List<String> args) async {
               // fragment to validate its grammar; raw calls require a full query.
               if (!isSql &&
                   !block.isRawQuery &&
+                  !hasPsql &&
                   RegExp(r'^\s*WITH\b').hasMatch(sql) &&
                   error.message == 'syntax error at end of input') {
                 try {
@@ -586,6 +725,14 @@ Future<void> checkSql(List<String> args) async {
       'Checked $bindingsChecked named parameter sets; $bindingFailures missing bindings; '
       '$bindingsSkipped binding checks skipped.',
     );
+    if (psqlCommands > 0 || psqlSkipped > 0) {
+      stdout.writeln(
+        'PSQL: $psqlCommands \\gexec commands; '
+        '$psqlSkipped scripts/templates skipped for unsupported psql commands.\n'
+        'Checked $psqlChecked generated SQL outputs; $psqlFailures failed; '
+        '$psqlUncovered not covered.',
+      );
+    }
     if (database != null) {
       stdout.writeln(
         'Database startup: ${lease!.startup.inMilliseconds} ms; schema preparation: ${lease.preparation.inMilliseconds} ms.',
